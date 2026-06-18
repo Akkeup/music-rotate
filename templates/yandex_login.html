@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Войти в Яндекс Музыку — Music Rotate</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <div class="logo">🎵 Music Rotate</div>
+  </header>
+  <main>
+    <section class="connect-section">
+      <h1>Войти в Яндекс Музыку</h1>
+      <p class="subtitle">Введи свои данные от Яндекса</p>
+
+      {% if error %}
+      <div class="error-banner">⚠ {{ error }}</div>
+      {% endif %}
+
+      <div class="card" style="max-width:420px;margin:24px auto">
+        <form action="/auth/yandex/login" method="post" class="token-form" style="gap:12px">
+          <input
+            type="text"
+            name="login"
+            placeholder="Логин (login@yandex.ru или номер телефона)"
+            required
+            autocomplete="username"
+            style="width:100%"
+          />
+          <input
+            type="password"
+            name="password"
+            placeholder="Пароль"
+            required
+            autocomplete="current-password"
+            style="width:100%"
+          />
+          <button type="submit" class="btn btn-yandex" style="width:100%">Войти</button>
+        </form>
+        <p class="hint" style="margin-top:12px">
+          Если включена двухфакторная аутентификация — создай
+          <a href="https://id.yandex.ru/security/app-passwords" target="_blank" style="color:var(--yandex)">пароль приложения</a>
+          и введи его вместо обычного пароля.
+        </p>
+      </div>
+
+      <p style="text-align:center;margin-top:8px">
+        <a href="/" class="btn-link">← Назад</a>
+      </p>
+    </section>
+  </main>
+</body>
+</html>

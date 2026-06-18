@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Music Rotate</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <div class="logo">🎵 Music Rotate</div>
+    <div class="accounts">
+      {% if spotify_connected %}
+        <span class="badge badge-spotify">{{ spotify_user }}</span>
+        <a href="/auth/spotify/logout" class="btn-link">Выйти из Spotify</a>
+      {% endif %}
+      {% if yandex_connected %}
+        <span class="badge badge-yandex">{{ yandex_user }}</span>
+        <a href="/auth/yandex/logout" class="btn-link">Выйти из Яндекса</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <main>
+    {% if error %}
+    <div class="error-banner">⚠ {{ error }}</div>
+    {% endif %}
+
+    <!-- ── Connect section ─────────────────────────────── -->
+    {% if not spotify_connected or not yandex_connected %}
+    <section class="connect-section">
+      <h1>Перенос музыки между сервисами</h1>
+      <p class="subtitle">Подключи оба аккаунта, чтобы начать</p>
+      <div class="connect-cards">
+
+        <div class="card {% if spotify_connected %}card-done{% endif %}">
+          <div class="card-icon spotify-icon">S</div>
+          <h2>Spotify</h2>
+          {% if spotify_connected %}
+            <p class="connected-label">✓ Подключён как {{ spotify_user }}</p>
+          {% else %}
+            <a href="/auth/spotify" class="btn btn-spotify">Войти через Spotify</a>
+          {% endif %}
+        </div>
+
+        <div class="card {% if yandex_connected %}card-done{% endif %}">
+          <div class="card-icon yandex-icon">Я</div>
+          <h2>Яндекс Музыка</h2>
+          {% if yandex_connected %}
+            <p class="connected-label">✓ Подключён как {{ yandex_user }}</p>
+          {% else %}
+            {% if yandex_oauth_enabled %}
+              <a href="/auth/yandex" class="btn btn-yandex">Войти через Яндекс</a>
+            {% else %}
+              <a href="/auth/yandex/login" class="btn btn-yandex">Войти через Яндекс</a>
+            {% endif %}
+          {% endif %}
+        </div>
+
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- ── Transfer section ────────────────────────────── -->
+    {% if spotify_connected and yandex_connected %}
+    <section class="transfer-section">
+      <h1>Перенести плейлист</h1>
+
+      <div class="direction-toggle">
+        <button class="dir-btn active" data-dir="spotify_to_yandex">
+          Spotify → Яндекс
+        </button>
+        <button class="dir-btn" data-dir="yandex_to_spotify">
+          Яндекс → Spotify
+        </button>
+      </div>
+
+      <div class="playlist-picker">
+        <label>Выбери плейлист:</label>
+        <select id="playlist-select">
+          <option value="">Загрузка...</option>
+        </select>
+      </div>
+
+      <button id="transfer-btn" class="btn btn-transfer" disabled>
+        Начать перенос
+      </button>
+    </section>
+
+    <!-- ── Progress section ────────────────────────────── -->
+    <section class="progress-section" id="progress-section" style="display:none">
+      <h2>Перенос</h2>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+      <p id="progress-label">Готовлюсь...</p>
+
+      <div id="track-list" class="track-list"></div>
+
+      <div id="summary" class="summary" style="display:none"></div>
+    </section>
+    {% endif %}
+
+  </main>
+
+  <script>
+    const SPOTIFY_CONNECTED = {{ 'true' if spotify_connected else 'false' }};
+    const YANDEX_CONNECTED  = {{ 'true' if yandex_connected  else 'false' }};
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
