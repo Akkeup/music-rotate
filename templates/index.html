@@ -61,6 +61,29 @@
     </section>
     {% endif %}
 
+    <!-- ── Session_id prompt ───────────────────────────── -->
+    {% if spotify_connected and yandex_connected and not yandex_session_ready %}
+    <section class="connect-section" style="padding:16px 0">
+      <div class="card" style="max-width:480px;margin:0 auto">
+        <h2 style="margin-bottom:8px">⚠ Нужны куки Яндекса</h2>
+        <p style="font-size:0.9em;color:#aaa;margin-bottom:12px">
+          Яндекс закрыл Music API для сторонних приложений. Нужна строка куков из браузера.
+        </p>
+        <p style="font-size:0.85em;color:#aaa;margin-bottom:12px">
+          1. Открой <b>music.yandex.ru</b> (войди в аккаунт)<br>
+          2. DevTools (F12) → <b>Сеть</b> (Network)<br>
+          3. Кликни на любой запрос к <b>api.music.yandex.net</b><br>
+          4. Заголовки запроса → найди <b>Cookie:</b> → скопируй всё значение целиком
+        </p>
+        <form method="post" action="/auth/yandex/session-cookie">
+          <textarea name="session_id" placeholder="Вставь полную строку Cookie сюда..."
+            style="width:100%;box-sizing:border-box;padding:8px;border-radius:8px;border:1px solid #555;background:#1a1a1a;color:#fff;font-size:0.8em;margin-bottom:8px;height:80px;resize:vertical"></textarea>
+          <button type="submit" class="btn btn-yandex" style="width:100%">Сохранить</button>
+        </form>
+      </div>
+    </section>
+    {% endif %}
+
     <!-- ── Transfer section ────────────────────────────── -->
     {% if spotify_connected and yandex_connected %}
     <section class="transfer-section">

@@ -50,6 +50,7 @@ async def index(request: Request):
         "spotify_user": request.session.get("spotify_user"),
         "yandex_user": request.session.get("yandex_user"),
         "yandex_oauth_enabled": bool(YANDEX_CLIENT_ID),
+        "yandex_session_ready": "yandex_session_id" in request.session,
         "error": request.query_params.get("error", ""),
     })
 
@@ -87,6 +88,7 @@ async def spotify_auth(request: Request):
         f"redirect_uri={SPOTIFY_REDIRECT_URI}",
         f"scope={SPOTIFY_SCOPE.replace(' ', '%20')}",
         f"state={state}",
+        "show_dialog=true",
     ])
     return RedirectResponse(f"https://accounts.spotify.com/authorize?{params}")
 
@@ -253,9 +255,24 @@ async def yandex_get_token_page():
     return RedirectResponse("/auth/yandex/login")
 
 
+@app.post("/auth/yandex/session-cookie")
+async def yandex_set_session_cookie(request: Request):
+    form = await request.form()
+    raw = (form.get("session_id") or "").strip()
+    if raw:
+        # Accept either full Cookie string or just Session_id value
+        if "Session_id=" in raw or "sessionid2=" in raw:
+            # Full cookie string provided — use as-is
+            request.session["yandex_session_id"] = raw
+        else:
+            # Just the value — wrap it
+            request.session["yandex_session_id"] = f"Session_id={raw}"
+    return RedirectResponse("/", status_code=303)
+
+
 @app.get("/auth/yandex/logout")
 async def yandex_logout(request: Request):
-    for k in ("yandex_token", "yandex_user"):
+    for k in ("yandex_token", "yandex_user", "yandex_uid", "yandex_session_id"):
         request.session.pop(k, None)
     return RedirectResponse("/")
 
@@ -302,6 +319,26 @@ async def yandex_playlists(request: Request):
     token = request.session.get("yandex_token")
     if not token:
         return JSONResponse({"error": "not_connected"}, status_code=401)
+
+    session_id = request.session.get("yandex_session_id")
+    uid = request.session.get("yandex_uid")
+
+    if session_id and uid:
+        try:
+            import requests as req
+            r = req.get(
+                f"https://api.music.yandex.ru/users/{uid}/playlists/list",
+                headers=_ym_headers(session_id),
+                timeout=15,
+            ).json()
+            if "result" in r:
+                return {"playlists": [
+                    {"id": str(p["kind"]), "name": p["title"], "count": p.get("trackCount", 0)}
+                    for p in r["result"]
+                ]}
+        except Exception as e:
+            print(f"[yandex_playlists] Session_id failed: {e}")
+
     try:
         def _fetch():
             ym = YMClient(token).init()
@@ -331,12 +368,13 @@ async def start_transfer(request: Request, background_tasks: BackgroundTasks):
     if not spotify_token or not yandex_token:
         return JSONResponse({"error": "not_connected"}, status_code=401)
 
+    yandex_session_id = request.session.get("yandex_session_id")
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"events": [], "done": False, "found": 0, "not_found": 0, "missing": []}
     background_tasks.add_task(
         _run_transfer,
         job_id, body["direction"], body["playlist_id"], body["playlist_name"],
-        spotify_token, yandex_token, yandex_uid,
+        spotify_token, yandex_token, yandex_uid, yandex_session_id,
     )
     return {"job_id": job_id}
 
@@ -364,7 +402,69 @@ async def transfer_stream(job_id: str):
 
 # ── Transfer worker (runs in thread via BackgroundTasks) ───────────────────────
 
-def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, yandex_token, yandex_uid=None):
+def _ym_search_track(query, session_id):
+    """Search for a track on Yandex Music using cookie auth. Returns {id, album_id} or None."""
+    import requests as req
+    r = req.get(
+        "https://api.music.yandex.ru/search",
+        params={"text": query, "type": "track", "page": 0},
+        headers=_ym_headers(session_id),
+        timeout=15,
+    ).json()
+    results = (r.get("result") or {}).get("tracks") or {}
+    items = results.get("results") or []
+    if items:
+        t = items[0]
+        albums = t.get("albums") or []
+        album_id = albums[0]["id"] if albums else None
+        return {"id": t["id"], "album_id": album_id}
+    return None
+
+
+def _ym_headers(session_id):
+    return {
+        "Cookie": session_id,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Origin": "https://music.yandex.ru",
+        "Referer": "https://music.yandex.ru/",
+    }
+
+
+def _ym_create_playlist(uid, title, session_id):
+    import requests as req
+    r = req.post(
+        f"https://api.music.yandex.ru/users/{uid}/playlists/create",
+        data={"title": title, "visibility": "public"},
+        headers=_ym_headers(session_id),
+        timeout=15,
+    ).json()
+    result = r.get("result")
+    if not result:
+        raise Exception(f"Ошибка создания плейлиста: {r.get('error', r)}")
+    return result["kind"]
+
+
+def _ym_add_tracks(uid, kind, tracks, session_id):
+    import requests as req
+    pl = req.get(
+        f"https://api.music.yandex.ru/users/{uid}/playlists/{kind}",
+        headers=_ym_headers(session_id),
+        timeout=15,
+    ).json().get("result", {})
+    revision = pl.get("revision", 1)
+    diff = json.dumps([{"op": "insert", "at": 0,
+                        "tracks": [{"id": t["id"], "albumId": t["album_id"]} for t in tracks]}])
+    r = req.post(
+        f"https://api.music.yandex.ru/users/{uid}/playlists/{kind}/change",
+        data={"diff": diff, "revision": revision},
+        headers=_ym_headers(session_id),
+        timeout=15,
+    ).json()
+    if "error" in r:
+        raise Exception(f"Ошибка добавления треков: {r['error']}")
+
+
+def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, yandex_token, yandex_uid=None, yandex_session_id=None):
     job = jobs[job_id]
 
     def push(event_type, **kwargs):
@@ -384,16 +484,24 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
             tracks = _get_spotify_tracks(spotify_token, playlist_id)
             push("total", count=len(tracks))
 
-            kind = ym.users_playlists_create(
-                f"{playlist_name} (from Spotify)", user_id=uid
-            ).kind
+            if yandex_session_id:
+                kind = _ym_create_playlist(uid, f"{playlist_name} (from Spotify)", yandex_session_id)
+            else:
+                kind = ym.users_playlists_create(f"{playlist_name} (from Spotify)", user_id=uid).kind
 
             found = []
             for i, track in enumerate(tracks, 1):
-                result = ym.search(f"{normalize(track['artist'])} {normalize(track['title'])}", type_="track")
-                if result and result.tracks and result.tracks.results:
-                    t = result.tracks.results[0]
-                    found.append({"id": t.id, "album_id": t.albums[0].id if t.albums else None})
+                query = f"{normalize(track['artist'])} {normalize(track['title'])}"
+                if yandex_session_id:
+                    t = _ym_search_track(query, yandex_session_id)
+                else:
+                    result = ym.search(query, type_="track")
+                    t = None
+                    if result and result.tracks and result.tracks.results:
+                        r0 = result.tracks.results[0]
+                        t = {"id": r0.id, "album_id": r0.albums[0].id if r0.albums else None}
+                if t:
+                    found.append(t)
                     job["found"] += 1
                     push("track", i=i, status="ok", artist=track["artist"], title=track["title"])
                 else:
@@ -402,28 +510,64 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
                     push("track", i=i, status="miss", artist=track["artist"], title=track["title"])
 
             if found:
-                pl = ym.users_playlists(kind, uid)[0]
-                diff = json.dumps([{"op": "insert", "at": 0,
-                                    "tracks": [{"id": t["id"], "albumId": t["album_id"]} for t in found]}])
-                ym.users_playlists_change(kind, diff, pl.revision, user_id=uid)
+                if yandex_session_id:
+                    _ym_add_tracks(uid, kind, found, yandex_session_id)
+                else:
+                    pl = ym.users_playlists(kind, uid)[0]
+                    diff = json.dumps([{"op": "insert", "at": 0,
+                                        "tracks": [{"id": t["id"], "albumId": t["album_id"]} for t in found]}])
+                    ym.users_playlists_change(kind, diff, pl.revision, user_id=uid)
 
         else:  # yandex_to_spotify
-            pl = ym.users_playlists(int(playlist_id), uid)
-            if not pl:
-                push("error", message="Плейлист не найден")
-                job["done"] = True
-                return
-
-            short = pl[0].tracks or []
-            full = ym.tracks([s.id for s in short]) if short else []
-            tracks = [
-                {"title": t.title, "artist": t.artists[0].name if t.artists else ""}
-                for t in (full or []) if t
-            ]
+            if yandex_session_id:
+                import requests as req
+                cookie_h = _ym_headers(yandex_session_id)
+                pl_resp = req.get(
+                    f"https://api.music.yandex.ru/users/{uid}/playlists/{playlist_id}",
+                    headers=cookie_h, timeout=15,
+                ).json()
+                pl_result = pl_resp.get("result")
+                if not pl_result:
+                    push("error", message=f"Плейлист не найден: {pl_resp.get('error', pl_resp)}")
+                    job["done"] = True
+                    return
+                short_tracks = pl_result.get("tracks", [])
+                if short_tracks:
+                    track_ids = ",".join(str(t["id"]) for t in short_tracks)
+                    tracks_resp = req.get(
+                        "https://api.music.yandex.ru/tracks",
+                        params={"track-ids": track_ids},
+                        headers=cookie_h, timeout=30,
+                    ).json()
+                    tracks = [
+                        {"title": t["title"], "artist": t["artists"][0]["name"] if t.get("artists") else ""}
+                        for t in (tracks_resp.get("result") or []) if t
+                    ]
+                else:
+                    tracks = []
+            else:
+                pl = ym.users_playlists(int(playlist_id), uid)
+                if not pl:
+                    push("error", message="Плейлист не найден")
+                    job["done"] = True
+                    return
+                short = pl[0].tracks or []
+                full = ym.tracks([s.id for s in short]) if short else []
+                tracks = [
+                    {"title": t.title, "artist": t.artists[0].name if t.artists else ""}
+                    for t in (full or []) if t
+                ]
             push("total", count=len(tracks))
 
-            sp_user = sp.current_user()["id"]
-            new_pl = sp.user_playlist_create(sp_user, f"{playlist_name} (from Yandex)", public=False)
+            import requests as req
+            new_pl = req.post(
+                "https://api.spotify.com/v1/me/playlists",
+                json={"name": f"{playlist_name} (from Yandex)", "public": False},
+                headers={"Authorization": f"Bearer {spotify_token}", "Content-Type": "application/json"},
+                timeout=15,
+            ).json()
+            if "id" not in new_pl:
+                raise Exception(f"Spotify: не удалось создать плейлист: {new_pl}")
             new_pl_id = new_pl["id"]
 
             found_ids = []
@@ -444,8 +588,17 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
                     job["missing"].append(f"{track['artist']} — {track['title']}")
                     push("track", i=i, status="miss", artist=track["artist"], title=track["title"])
 
+            sp_headers = {"Authorization": f"Bearer {spotify_token}", "Content-Type": "application/json"}
             for i in range(0, len(found_ids), 100):
-                sp.playlist_add_items(new_pl_id, found_ids[i:i + 100])
+                batch = [f"spotify:track:{tid}" for tid in found_ids[i:i + 100]]
+                r = req.post(
+                    f"https://api.spotify.com/v1/playlists/{new_pl_id}/items",
+                    json={"uris": batch},
+                    headers=sp_headers,
+                    timeout=15,
+                ).json()
+                if "error" in r:
+                    raise Exception(f"Spotify add tracks: {r['error']}")
 
     except Exception as e:
         import traceback
@@ -456,6 +609,35 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
     job["done"] = True
 
 
+@app.get("/debug/test")
+async def debug_test(request: Request):
+    import requests as req
+    result = {}
+
+    # Test Spotify token
+    sp_token = request.session.get("spotify_token")
+    result["spotify_token_present"] = bool(sp_token)
+    if sp_token:
+        r = req.get("https://api.spotify.com/v1/me", headers={"Authorization": f"Bearer {sp_token}"}, timeout=10)
+        result["spotify_me"] = r.status_code
+
+    # Test Yandex session cookie
+    session_id = request.session.get("yandex_session_id")
+    uid = request.session.get("yandex_uid")
+    result["yandex_session_id_present"] = bool(session_id)
+    result["yandex_uid"] = uid
+    if session_id and uid:
+        r = req.get(
+            f"https://api.music.yandex.ru/users/{uid}/playlists/list",
+            headers=_ym_headers(session_id),
+            timeout=10,
+        )
+        result["yandex_playlists_status"] = r.status_code
+        result["yandex_playlists_response"] = r.json()
+
+    return result
+
+
 def _get_spotify_tracks(token, playlist_id):
     import requests as req
     headers = {"Authorization": f"Bearer {token}"}
@@ -463,6 +645,8 @@ def _get_spotify_tracks(token, playlist_id):
     tracks = []
     resp = req.get(url, headers=headers, timeout=15)
     data = resp.json()
+    if "error" in data:
+        raise Exception(f"Spotify: {data['error'].get('message', data['error'])}")
     while True:
         for item in data.get("items", []):
             t = item.get("track") or item.get("item")
@@ -472,7 +656,9 @@ def _get_spotify_tracks(token, playlist_id):
         if not next_url:
             break
         data = req.get(next_url, headers=headers, timeout=15).json()
-    print(f"[DEBUG] total tracks fetched: {len(tracks)}")
+        if "error" in data:
+            raise Exception(f"Spotify pagination: {data['error'].get('message', data['error'])}")
+    print(f"[DEBUG] total tracks fetched: {len(tracks)}", flush=True)
     return tracks
 
 
