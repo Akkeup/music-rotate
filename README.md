@@ -4,18 +4,17 @@
 
 ## Возможности
 
-- Spotify → Яндекс Музыка
-- Яндекс Музыка → Spotify
-- Прогресс переноса в реальном времени
+- Spotify → Яндекс Музыка и обратно
+- Прогресс переноса в реальном времени через SSE
 - Отчёт о найденных и не найденных треках
+- Авторизация Яндекс Музыки через Device Auth Flow (без ручного копирования Cookie)
 
 ## Требования
 
 - Python 3.9+
-- Аккаунт Spotify Premium
+- Аккаунт Spotify (Premium не обязателен для чтения плейлистов)
 - Аккаунт Яндекс Музыки
 - Зарегистрированное приложение на [developer.spotify.com](https://developer.spotify.com)
-- Зарегистрированное приложение на [oauth.yandex.ru](https://oauth.yandex.ru)
 
 ## Установка
 
@@ -31,7 +30,7 @@ cp .env.example .env
 Заполни `.env`:
 
 ```env
-SECRET_KEY=случайная-строка
+SECRET_KEY=<случайная строка, минимум 32 символа>
 
 SPOTIFY_CLIENT_ID=...
 SPOTIFY_CLIENT_SECRET=...
@@ -39,8 +38,19 @@ SPOTIFY_REDIRECT_URI=http://127.0.0.1:8000/auth/spotify/callback
 
 YANDEX_CLIENT_ID=...
 YANDEX_CLIENT_SECRET=...
-YANDEX_REDIRECT_URI=http://127.0.0.1:8000/auth/yandex/callback
 ```
+
+### Настройка Spotify
+
+1. Создай приложение на [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+2. В настройках добавь Redirect URI: `http://127.0.0.1:8000/auth/spotify/callback`
+3. Скопируй Client ID и Client Secret в `.env`
+
+### Настройка Яндекс
+
+1. Создай приложение на [oauth.yandex.ru](https://oauth.yandex.ru)
+2. Права: `login:info`, `music:read`, `music:write` (или `music:all`)
+3. Скопируй Client ID и Client Secret в `.env`
 
 ## Запуск
 
@@ -50,13 +60,23 @@ venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8000
 
 Открой [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-## Авторизация Яндекс Музыки
+## Авторизация
 
-Яндекс закрыл Music API для сторонних приложений, поэтому после входа через OAuth нужно дополнительно вставить строку Cookie из браузера:
+### Spotify
+Стандартный OAuth 2.0. Нажми «Подключить» и войди через браузер.
 
-1. Открой [music.yandex.ru](https://music.yandex.ru) и войди в аккаунт
-2. F12 → Network → кликни на любой запрос к `api.music.yandex.ru`
-3. В заголовках запроса найди `Cookie:` и скопируй всё значение целиком
-4. Вставь в поле на сайте
+### Яндекс Музыка
+Используется Device Auth Flow (RFC 8628) — не нужно копировать Cookie вручную:
 
-Куки действуют пока активна сессия в браузере.
+1. Нажми «Подключить» на странице подключения
+2. Приложение покажет короткий код и ссылку для подтверждения
+3. Открой ссылку в браузере, войди в Яндекс и введи код
+4. Страница автоматически подтвердит подключение
+
+Токен сохраняется локально в `.ym_music_tokens.json` (файл не попадает в git).
+
+## Безопасность
+
+- Токены хранятся в сессии и локальном файле с правами `600`
+- `SECRET_KEY` используется для подписи сессий — держи его в тайне
+- Файл `.env` не попадает в git (добавлен в `.gitignore`)

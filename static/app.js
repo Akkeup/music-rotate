@@ -176,7 +176,19 @@ if (!SPOTIFY_CONNECTED || !YANDEX_CONNECTED) {
         progLabel.textContent = "Готово!";
         btn.disabled = false;
         showSummary(msg);
-        document.getElementById("main").classList.add("layout-done");
+        const mainEl = document.getElementById("main");
+        mainEl.classList.add("layout-done");
+        // Align summary top with the platform card top
+        requestAnimationFrame(() => {
+          const card = document.querySelector(".transfer-dir-card");
+          const leftCol = document.getElementById("left-col");
+          const summaryEl = document.getElementById("summary");
+          if (card && leftCol && summaryEl) {
+            // #left-col and #summary are siblings; measure card offset from #left-col top
+            const offset = card.getBoundingClientRect().top - leftCol.getBoundingClientRect().top;
+            summaryEl.style.marginTop = Math.max(0, offset) + "px";
+          }
+        });
       }
     };
 

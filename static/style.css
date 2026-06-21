@@ -151,7 +151,7 @@ main.layout-done #summary {
   top: 80px;
   max-height: calc(100vh - 100px);
   overflow-y: auto;
-  margin-top: calc(1.6rem * 1.15 + 40px); /* align with platform card: h1 height + transfer-section gap */
+  margin-top: 0; /* set dynamically by JS to align with platform card */
 }
 
 main.layout-done #summary::-webkit-scrollbar { width: 3px; }
