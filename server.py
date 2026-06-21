@@ -37,6 +37,7 @@ YANDEX_CLIENT_SECRET = os.getenv("YANDEX_CLIENT_SECRET", "")
 YANDEX_REDIRECT_URI = os.getenv("YANDEX_REDIRECT_URI", "http://127.0.0.1:8000/auth/yandex/callback")
 
 jobs: dict = {}
+device_auth_jobs: dict = {}  # job_id -> {status, code_info, token, error}
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ async def index(request: Request):
         "spotify_user": request.session.get("spotify_user"),
         "yandex_user": request.session.get("yandex_user"),
         "yandex_oauth_enabled": bool(YANDEX_CLIENT_ID),
-        "yandex_session_ready": "yandex_session_id" in request.session,
+        "yandex_session_ready": "yandex_session_id" in request.session or "yandex_music_token" in request.session,
         "error": request.query_params.get("error", ""),
     })
 
@@ -209,6 +210,40 @@ async def _save_yandex_session(request: Request, token: str):
     request.session["yandex_uid"] = str(uid) if uid else None
     request.session["yandex_user"] = login or "Яндекс"
 
+    # Try to restore saved music token
+    if uid:
+        saved = _load_ym_tokens().get(str(uid))
+        if saved:
+            request.session["yandex_music_token"] = saved
+            request.session.pop("yandex_session_id", None)
+            return
+
+    # Try to auto-exchange OAuth token for a Yandex Music token via mobile proxy
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            for client_id, client_secret in [
+                ("c0ebe342af7d48fbbbfcf2d2eedb8f9e", "ad0a908f0aa341a182a37ecd75bc319e"),
+                ("23cabbbdc6cd418abb4b39c32c41195d", "53bc75238f0c4d08a118e51fe9203300"),
+            ]:
+                resp = await client.post(
+                    "https://mobileproxy.passport.yandex.net/1/bundle/oauth/token_by_sessionid",
+                    data={"client_id": client_id, "client_secret": client_secret},
+                    headers={
+                        "Ya-Client-Host": "passport.yandex.ru",
+                        "Ya-Client-Cookie": f"Session_id={token}",
+                        "Authorization": f"OAuth {token}",
+                    },
+                )
+                data = resp.json()
+                music_token = data.get("access_token")
+                if music_token:
+                    request.session["yandex_music_token"] = music_token
+                    if uid:
+                        _save_ym_token(str(uid), music_token)
+                    return
+    except Exception as e:
+        print(f"[YM auto token] failed: {e}", flush=True)
+
 
 @app.get("/auth/yandex/login")
 async def yandex_login_form(request: Request):
@@ -260,14 +295,128 @@ async def yandex_set_session_cookie(request: Request):
     form = await request.form()
     raw = (form.get("session_id") or "").strip()
     if raw:
-        # Accept either full Cookie string or just Session_id value
         if "Session_id=" in raw or "sessionid2=" in raw:
-            # Full cookie string provided — use as-is
             request.session["yandex_session_id"] = raw
         else:
-            # Just the value — wrap it
             request.session["yandex_session_id"] = f"Session_id={raw}"
     return RedirectResponse("/", status_code=303)
+
+
+YM_TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".ym_music_tokens.json")
+
+def _load_ym_tokens() -> dict:
+    try:
+        with open(YM_TOKEN_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_ym_token(uid: str, token: str):
+    tokens = _load_ym_tokens()
+    tokens[uid] = token
+    fd = os.open(YM_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(tokens, f)
+
+
+@app.get("/auth/yandex/music-oauth-url")
+async def yandex_music_oauth_url():
+    """Returns the Yandex Music implicit OAuth URL (token goes to music.yandex.ru#access_token=...)."""
+    url = "https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d"
+    return {"url": url}
+
+
+@app.post("/auth/yandex/music-token")
+async def yandex_set_music_token(request: Request):
+    form = await request.form()
+    raw = (form.get("token") or "").strip()
+    # Accept full fragment string like "access_token=TOKEN&token_type=bearer&..."
+    import re
+    m = re.search(r"access_token=([^&\s]+)", raw)
+    token = m.group(1) if m else raw
+
+    if not token:
+        return RedirectResponse("/?error=empty_token", status_code=303)
+
+    try:
+        def _init():
+            return YMClient(token).init()
+        ym = await asyncio.to_thread(_init)
+        uid = str(ym.me.account.uid) if (ym.me and ym.me.account) else None
+        login = ym.me.account.login if (ym.me and ym.me.account) else None
+
+        request.session["yandex_token"] = token
+        request.session["yandex_music_token"] = token
+        request.session["yandex_uid"] = uid
+        request.session["yandex_user"] = login or "Яндекс"
+        request.session.pop("yandex_session_id", None)  # cookies no longer needed
+
+        if uid:
+            _save_ym_token(uid, token)
+
+        return RedirectResponse("/", status_code=303)
+    except Exception as e:
+        from urllib.parse import quote
+        return RedirectResponse(f"/?error={quote(str(e)[:200])}", status_code=303)
+
+
+@app.post("/auth/yandex/device/start")
+async def yandex_device_start():
+    """Start Yandex Music device auth flow. Returns job_id + code info when available."""
+    job_id = str(uuid.uuid4())
+    device_auth_jobs[job_id] = {"status": "starting", "code_info": None, "token": None, "error": None}
+
+    def run():
+        def on_code(code):
+            device_auth_jobs[job_id]["code_info"] = {
+                "user_code": code.user_code,
+                "verification_url": code.verification_url,
+                "expires_in": getattr(code, "expires_in", 300),
+            }
+            device_auth_jobs[job_id]["status"] = "awaiting_user"
+
+        try:
+            result = YMClient().device_auth(on_code=on_code)
+            device_auth_jobs[job_id]["token"] = result.access_token
+            device_auth_jobs[job_id]["status"] = "done"
+        except Exception as e:
+            device_auth_jobs[job_id]["error"] = str(e)
+            device_auth_jobs[job_id]["status"] = "error"
+
+    asyncio.get_event_loop().run_in_executor(None, run)
+    return {"job_id": job_id}
+
+
+@app.get("/auth/yandex/device/status/{job_id}")
+async def yandex_device_status(job_id: str):
+    job = device_auth_jobs.get(job_id)
+    if not job:
+        return JSONResponse({"status": "not_found"}, status_code=404)
+    return {
+        "status": job["status"],
+        "code_info": job["code_info"],
+        "error": job["error"],
+    }
+
+
+@app.post("/auth/yandex/device/confirm/{job_id}")
+async def yandex_device_confirm(job_id: str, request: Request):
+    """Called by frontend when polling detects token is ready."""
+    job = device_auth_jobs.get(job_id)
+    if not job or job["status"] != "done" or not job["token"]:
+        return JSONResponse({"error": "not_ready"}, status_code=400)
+
+    token = job["token"]
+    try:
+        await _save_yandex_session(request, token)
+        uid = request.session.get("yandex_uid")
+        if uid:
+            _save_ym_token(uid, token)
+            request.session["yandex_music_token"] = token
+        device_auth_jobs.pop(job_id, None)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/auth/yandex/logout")
@@ -320,15 +469,22 @@ async def yandex_playlists(request: Request):
     if not token:
         return JSONResponse({"error": "not_connected"}, status_code=401)
 
+    music_token = request.session.get("yandex_music_token")
     session_id = request.session.get("yandex_session_id")
     uid = request.session.get("yandex_uid")
 
-    if session_id and uid:
+    auth_header = None
+    if music_token:
+        auth_header = {"Authorization": f"OAuth {music_token}"}
+    elif session_id:
+        auth_header = _ym_headers(session_id)
+
+    if auth_header and uid:
         try:
             import requests as req
             r = req.get(
                 f"https://api.music.yandex.ru/users/{uid}/playlists/list",
-                headers=_ym_headers(session_id),
+                headers=auth_header,
                 timeout=15,
             ).json()
             if "result" in r:
@@ -337,7 +493,7 @@ async def yandex_playlists(request: Request):
                     for p in r["result"]
                 ]}
         except Exception as e:
-            print(f"[yandex_playlists] Session_id failed: {e}")
+            print(f"[yandex_playlists] direct API failed: {e}")
 
     try:
         def _fetch():
@@ -369,12 +525,13 @@ async def start_transfer(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse({"error": "not_connected"}, status_code=401)
 
     yandex_session_id = request.session.get("yandex_session_id")
+    yandex_music_token = request.session.get("yandex_music_token")
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"events": [], "done": False, "found": 0, "not_found": 0, "missing": []}
     background_tasks.add_task(
         _run_transfer,
         job_id, body["direction"], body["playlist_id"], body["playlist_name"],
-        spotify_token, yandex_token, yandex_uid, yandex_session_id,
+        spotify_token, yandex_token, yandex_uid, yandex_session_id, yandex_music_token,
     )
     return {"job_id": job_id}
 
@@ -402,13 +559,13 @@ async def transfer_stream(job_id: str):
 
 # ── Transfer worker (runs in thread via BackgroundTasks) ───────────────────────
 
-def _ym_search_track(query, session_id):
-    """Search for a track on Yandex Music using cookie auth. Returns {id, album_id} or None."""
+def _ym_search_track(query, music_token=None, session_id=None):
+    """Search for a track on Yandex Music. Returns {id, album_id} or None."""
     import requests as req
     r = req.get(
         "https://api.music.yandex.ru/search",
         params={"text": query, "type": "track", "page": 0},
-        headers=_ym_headers(session_id),
+        headers=_ym_auth_headers(music_token, session_id),
         timeout=15,
     ).json()
     results = (r.get("result") or {}).get("tracks") or {}
@@ -430,12 +587,22 @@ def _ym_headers(session_id):
     }
 
 
-def _ym_create_playlist(uid, title, session_id):
+def _ym_auth_headers(music_token=None, session_id=None):
+    """Returns auth headers preferring music_token (Bearer) over session_id (Cookie)."""
+    if music_token:
+        return {
+            "Authorization": f"OAuth {music_token}",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        }
+    return _ym_headers(session_id)
+
+
+def _ym_create_playlist(uid, title, music_token=None, session_id=None):
     import requests as req
     r = req.post(
         f"https://api.music.yandex.ru/users/{uid}/playlists/create",
         data={"title": title, "visibility": "public"},
-        headers=_ym_headers(session_id),
+        headers=_ym_auth_headers(music_token, session_id),
         timeout=15,
     ).json()
     result = r.get("result")
@@ -444,11 +611,12 @@ def _ym_create_playlist(uid, title, session_id):
     return result["kind"]
 
 
-def _ym_add_tracks(uid, kind, tracks, session_id):
+def _ym_add_tracks(uid, kind, tracks, music_token=None, session_id=None):
     import requests as req
+    h = _ym_auth_headers(music_token, session_id)
     pl = req.get(
         f"https://api.music.yandex.ru/users/{uid}/playlists/{kind}",
-        headers=_ym_headers(session_id),
+        headers=h,
         timeout=15,
     ).json().get("result", {})
     revision = pl.get("revision", 1)
@@ -457,14 +625,14 @@ def _ym_add_tracks(uid, kind, tracks, session_id):
     r = req.post(
         f"https://api.music.yandex.ru/users/{uid}/playlists/{kind}/change",
         data={"diff": diff, "revision": revision},
-        headers=_ym_headers(session_id),
+        headers=h,
         timeout=15,
     ).json()
     if "error" in r:
         raise Exception(f"Ошибка добавления треков: {r['error']}")
 
 
-def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, yandex_token, yandex_uid=None, yandex_session_id=None):
+def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, yandex_token, yandex_uid=None, yandex_session_id=None, yandex_music_token=None):
     job = jobs[job_id]
 
     def push(event_type, **kwargs):
@@ -480,20 +648,25 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
             job["done"] = True
             return
 
+        # Prefer music_token (Bearer OAuth) over session_id (Cookie) for direct API calls
+        ym_mt = yandex_music_token
+        ym_sid = yandex_session_id
+        ym_direct = bool(ym_mt or ym_sid)  # True if we have direct API access
+
         if direction == "spotify_to_yandex":
             tracks = _get_spotify_tracks(spotify_token, playlist_id)
             push("total", count=len(tracks))
 
-            if yandex_session_id:
-                kind = _ym_create_playlist(uid, f"{playlist_name} (from Spotify)", yandex_session_id)
+            if ym_direct:
+                kind = _ym_create_playlist(uid, f"{playlist_name} (from Spotify)", ym_mt, ym_sid)
             else:
                 kind = ym.users_playlists_create(f"{playlist_name} (from Spotify)", user_id=uid).kind
 
             found = []
             for i, track in enumerate(tracks, 1):
                 query = f"{normalize(track['artist'])} {normalize(track['title'])}"
-                if yandex_session_id:
-                    t = _ym_search_track(query, yandex_session_id)
+                if ym_direct:
+                    t = _ym_search_track(query, ym_mt, ym_sid)
                 else:
                     result = ym.search(query, type_="track")
                     t = None
@@ -510,8 +683,8 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
                     push("track", i=i, status="miss", artist=track["artist"], title=track["title"])
 
             if found:
-                if yandex_session_id:
-                    _ym_add_tracks(uid, kind, found, yandex_session_id)
+                if ym_direct:
+                    _ym_add_tracks(uid, kind, found, ym_mt, ym_sid)
                 else:
                     pl = ym.users_playlists(kind, uid)[0]
                     diff = json.dumps([{"op": "insert", "at": 0,
@@ -519,12 +692,12 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
                     ym.users_playlists_change(kind, diff, pl.revision, user_id=uid)
 
         else:  # yandex_to_spotify
-            if yandex_session_id:
+            if ym_direct:
                 import requests as req
-                cookie_h = _ym_headers(yandex_session_id)
+                ym_h = _ym_auth_headers(ym_mt, ym_sid)
                 pl_resp = req.get(
                     f"https://api.music.yandex.ru/users/{uid}/playlists/{playlist_id}",
-                    headers=cookie_h, timeout=15,
+                    headers=ym_h, timeout=15,
                 ).json()
                 pl_result = pl_resp.get("result")
                 if not pl_result:
@@ -537,7 +710,7 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
                     tracks_resp = req.get(
                         "https://api.music.yandex.ru/tracks",
                         params={"track-ids": track_ids},
-                        headers=cookie_h, timeout=30,
+                        headers=ym_h, timeout=30,
                     ).json()
                     tracks = [
                         {"title": t["title"], "artist": t["artists"][0]["name"] if t.get("artists") else ""}
@@ -608,34 +781,6 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
 
     job["done"] = True
 
-
-@app.get("/debug/test")
-async def debug_test(request: Request):
-    import requests as req
-    result = {}
-
-    # Test Spotify token
-    sp_token = request.session.get("spotify_token")
-    result["spotify_token_present"] = bool(sp_token)
-    if sp_token:
-        r = req.get("https://api.spotify.com/v1/me", headers={"Authorization": f"Bearer {sp_token}"}, timeout=10)
-        result["spotify_me"] = r.status_code
-
-    # Test Yandex session cookie
-    session_id = request.session.get("yandex_session_id")
-    uid = request.session.get("yandex_uid")
-    result["yandex_session_id_present"] = bool(session_id)
-    result["yandex_uid"] = uid
-    if session_id and uid:
-        r = req.get(
-            f"https://api.music.yandex.ru/users/{uid}/playlists/list",
-            headers=_ym_headers(session_id),
-            timeout=10,
-        )
-        result["yandex_playlists_status"] = r.status_code
-        result["yandex_playlists_response"] = r.json()
-
-    return result
 
 
 def _get_spotify_tracks(token, playlist_id):

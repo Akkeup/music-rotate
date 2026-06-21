@@ -61,27 +61,102 @@
     </section>
     {% endif %}
 
-    <!-- ── Session_id prompt ───────────────────────────── -->
+    <!-- ── Yandex Music device auth ───────────────────── -->
     {% if spotify_connected and yandex_connected and not yandex_session_ready %}
     <section class="connect-section" style="padding:16px 0">
-      <div class="card" style="max-width:480px;margin:0 auto">
-        <h2 style="margin-bottom:8px">⚠ Нужны куки Яндекса</h2>
-        <p style="font-size:0.9em;color:#aaa;margin-bottom:12px">
-          Яндекс закрыл Music API для сторонних приложений. Нужна строка куков из браузера.
+      <div class="card" style="max-width:480px;margin:0 auto" id="device-auth-card">
+        <h2 style="margin-bottom:8px">Подключить Яндекс Музыку</h2>
+        <p style="font-size:0.9em;color:#aaa;margin-bottom:16px">
+          Нажми кнопку — ты получишь короткий код для входа через сайт Яндекса (как на Smart TV).
         </p>
-        <p style="font-size:0.85em;color:#aaa;margin-bottom:12px">
-          1. Открой <b>music.yandex.ru</b> (войди в аккаунт)<br>
-          2. DevTools (F12) → <b>Сеть</b> (Network)<br>
-          3. Кликни на любой запрос к <b>api.music.yandex.net</b><br>
-          4. Заголовки запроса → найди <b>Cookie:</b> → скопируй всё значение целиком
-        </p>
-        <form method="post" action="/auth/yandex/session-cookie">
-          <textarea name="session_id" placeholder="Вставь полную строку Cookie сюда..."
-            style="width:100%;box-sizing:border-box;padding:8px;border-radius:8px;border:1px solid #555;background:#1a1a1a;color:#fff;font-size:0.8em;margin-bottom:8px;height:80px;resize:vertical"></textarea>
-          <button type="submit" class="btn btn-yandex" style="width:100%">Сохранить</button>
-        </form>
+
+        <div id="da-start">
+          <button class="btn btn-yandex" style="width:100%" onclick="startDeviceAuth()">
+            Войти через Яндекс Музыку
+          </button>
+        </div>
+
+        <div id="da-loading" style="display:none;text-align:center;padding:16px 0;color:#aaa;font-size:0.9em">
+          Получаю код...
+        </div>
+
+        <div id="da-code" style="display:none">
+          <p style="font-size:0.85em;color:#aaa;margin-bottom:8px">
+            1. Открой в браузере:
+            <a id="da-url" href="#" target="_blank" style="color:#ffcc00;word-break:break-all"></a>
+          </p>
+          <p style="font-size:0.85em;color:#aaa;margin-bottom:4px">2. Введи код:</p>
+          <div id="da-user-code" style="font-size:2em;font-weight:bold;letter-spacing:0.15em;text-align:center;padding:12px;background:#111;border-radius:8px;margin-bottom:16px;font-family:monospace"></div>
+          <p style="font-size:0.8em;color:#888;text-align:center" id="da-status-label">Жду подтверждения...</p>
+        </div>
+
+        <div id="da-error" style="display:none;color:#e05;font-size:0.85em;margin-top:12px"></div>
       </div>
     </section>
+
+    <script>
+    async function startDeviceAuth() {
+      document.getElementById('da-start').style.display = 'none';
+      document.getElementById('da-loading').style.display = 'block';
+      document.getElementById('da-error').style.display = 'none';
+
+      let job_id;
+      try {
+        const res = await fetch('/auth/yandex/device/start', { method: 'POST' });
+        ({ job_id } = await res.json());
+      } catch (e) {
+        showDAError('Ошибка запуска: ' + e.message);
+        return;
+      }
+
+      pollDeviceAuth(job_id);
+    }
+
+    async function pollDeviceAuth(job_id) {
+      try {
+        const res = await fetch('/auth/yandex/device/status/' + job_id);
+        const job = await res.json();
+
+        if (job.status === 'awaiting_user' && job.code_info) {
+          document.getElementById('da-loading').style.display = 'none';
+          const ci = job.code_info;
+          document.getElementById('da-url').href = ci.verification_url;
+          document.getElementById('da-url').textContent = ci.verification_url;
+          document.getElementById('da-user-code').textContent = ci.user_code;
+          document.getElementById('da-code').style.display = 'block';
+        }
+
+        if (job.status === 'done') {
+          document.getElementById('da-status-label').textContent = 'Подтверждено! Сохраняю...';
+          const r = await fetch('/auth/yandex/device/confirm/' + job_id, { method: 'POST' });
+          const data = await r.json();
+          if (data.ok) {
+            window.location.href = '/';
+          } else {
+            showDAError('Ошибка сохранения: ' + (data.error || ''));
+          }
+          return;
+        }
+
+        if (job.status === 'error') {
+          showDAError('Ошибка: ' + (job.error || 'неизвестная ошибка'));
+          return;
+        }
+
+        setTimeout(() => pollDeviceAuth(job_id), 3000);
+      } catch (e) {
+        showDAError('Ошибка опроса: ' + e.message);
+      }
+    }
+
+    function showDAError(msg) {
+      document.getElementById('da-loading').style.display = 'none';
+      document.getElementById('da-start').style.display = 'block';
+      const el = document.getElementById('da-error');
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+    </script>
     {% endif %}
 
     <!-- ── Transfer section ────────────────────────────── -->
