@@ -24,6 +24,17 @@ app.add_middleware(
     secret_key=os.getenv("SECRET_KEY", secrets.token_hex(32)),
     max_age=60 * 60 * 24 * 7,
 )
+
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -783,27 +794,76 @@ def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, 
 
 
 
+def _parse_spotify_items(items):
+    tracks = []
+    skipped_null = 0
+    skipped_local = 0
+    for item in items:
+        t = item.get("track") or item.get("item")  # Spotify uses "item" key in newer API responses
+        if not t or not t.get("name"):
+            skipped_null += 1
+            continue
+        if item.get("is_local") or t.get("is_local"):
+            skipped_local += 1
+            continue
+        artists = t.get("artists") or []
+        tracks.append({
+            "title": t["name"],
+            "artist": artists[0]["name"] if artists else "",
+        })
+    if skipped_null or skipped_local:
+        print(f"[SPOTIFY] skipped: {skipped_null} null tracks, {skipped_local} local tracks", flush=True)
+    return tracks
+
+
 def _get_spotify_tracks(token, playlist_id):
     import requests as req
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/items?limit=100"
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/items?limit=100&market=from_token"
     tracks = []
     resp = req.get(url, headers=headers, timeout=15)
+
+    # On 403 (Forbidden for followed/saved playlists), try spotipy as fallback
+    if resp.status_code == 403:
+        print(f"[SPOTIFY] 403 for playlist {playlist_id}, trying spotipy fallback", flush=True)
+        try:
+            sp = spotipy.Spotify(auth=token)
+            results = sp.playlist_items(playlist_id, limit=100)
+            while results:
+                tracks.extend(_parse_spotify_items(results.get("items", [])))
+                if results.get("next"):
+                    results = sp.next(results)
+                else:
+                    break
+            print(f"[DEBUG] spotipy fallback: {len(tracks)} tracks", flush=True)
+            return tracks
+        except Exception as e:
+            raise Exception(f"Плейлист недоступен (403). Возможно, это чужой приватный плейлист. Детали: {e}")
+
     data = resp.json()
     if "error" in data:
         raise Exception(f"Spotify: {data['error'].get('message', data['error'])}")
+
+    total_items = data.get("total", "?")
+    items = data.get("items", [])
+    print(f"[SPOTIFY] playlist total={total_items}, items in page={len(items)}", flush=True)
+    if items:
+        first = items[0]
+        track = first.get("track")
+        print(f"[SPOTIFY] first item keys={list(first.keys())}, track={track is not None}, is_local={first.get('is_local')}", flush=True)
+        if track:
+            print(f"[SPOTIFY] first track name={track.get('name')}, type={track.get('type')}, id={track.get('id')}", flush=True)
+
     while True:
-        for item in data.get("items", []):
-            t = item.get("track") or item.get("item")
-            if t and t.get("name") and not item.get("is_local"):
-                tracks.append({"title": t["name"], "artist": t["artists"][0]["name"] if t.get("artists") else ""})
+        tracks.extend(_parse_spotify_items(data.get("items", [])))
         next_url = data.get("next")
         if not next_url:
             break
         data = req.get(next_url, headers=headers, timeout=15).json()
         if "error" in data:
-            raise Exception(f"Spotify pagination: {data['error'].get('message', data['error'])}")
-    print(f"[DEBUG] total tracks fetched: {len(tracks)}", flush=True)
+            raise Exception(f"Spotify: {data['error'].get('message', data['error'])}")
+
+    print(f"[SPOTIFY] total tracks fetched: {len(tracks)}", flush=True)
     return tracks
 
 

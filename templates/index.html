@@ -1,15 +1,26 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Music Rotate</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=6" />
 </head>
 <body>
+
   <header>
-    <div class="logo">🎵 Music Rotate</div>
-    <div class="accounts">
+    <a class="logo" href="/">
+      <svg class="logo-icon" width="20" height="18" viewBox="0 0 20 18" fill="none">
+        <rect x="0"  y="6"  width="2" height="6"  rx="1" fill="currentColor"/>
+        <rect x="4"  y="2"  width="2" height="14" rx="1" fill="currentColor"/>
+        <rect x="8"  y="0"  width="2" height="18" rx="1" fill="currentColor"/>
+        <rect x="12" y="4"  width="2" height="10" rx="1" fill="currentColor"/>
+        <rect x="16" y="7"  width="2" height="4"  rx="1" fill="currentColor"/>
+      </svg>
+      Music Rotate
+    </a>
+
+    <div class="header-right">
       {% if spotify_connected %}
         <span class="badge badge-spotify">{{ spotify_user }}</span>
         <a href="/auth/spotify/logout" class="btn-link">Выйти из Spotify</a>
@@ -18,41 +29,95 @@
         <span class="badge badge-yandex">{{ yandex_user }}</span>
         <a href="/auth/yandex/logout" class="btn-link">Выйти из Яндекса</a>
       {% endif %}
+      <button class="theme-toggle" id="theme-toggle" title="Тема">
+        <svg id="icon-sun" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+          <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+        <svg id="icon-moon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:none">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
     </div>
   </header>
 
-  <main>
+  <main id="main">
+  <div id="left-col">
     {% if error %}
-    <div class="error-banner">⚠ {{ error }}</div>
+    <div class="error-banner">{{ error }}</div>
     {% endif %}
 
-    <!-- ── Connect section ─────────────────────────────── -->
+    <!-- ── Connect / Hero ───────────────────────────────── -->
     {% if not spotify_connected or not yandex_connected %}
-    <section class="connect-section">
-      <h1>Перенос музыки между сервисами</h1>
-      <p class="subtitle">Подключи оба аккаунта, чтобы начать</p>
-      <div class="connect-cards">
+    <section class="hero">
+      <p class="hero-eyebrow">Перенос музыки</p>
+      <h1 class="hero-title">
+        Переносите треки<br>
+        между <span class="text-spotify">Spotify</span><br>
+        и <span class="text-yandex">Яндекс Музыкой</span>
+      </h1>
+      <p class="hero-sub">Подключи оба аккаунта и переноси плейлисты в пару кликов — в любую сторону.</p>
 
-        <div class="card {% if spotify_connected %}card-done{% endif %}">
-          <div class="card-icon spotify-icon">S</div>
-          <h2>Spotify</h2>
+      <div class="platform-card">
+
+        <!-- Spotify -->
+        <div class="platform-side">
+          <span class="platform-label">Источник</span>
+          <div class="platform-name">
+            <span class="p-icon spotify-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.586 14.424a.622.622 0 01-.857.207c-2.348-1.435-5.304-1.76-8.785-.964a.622.622 0 01-.277-1.215c3.809-.87 7.076-.496 9.712 1.115a.622.622 0 01.207.857zm1.223-2.722a.779.779 0 01-1.07.257c-2.687-1.652-6.785-2.131-9.965-1.166a.778.778 0 01-.972-.519.779.779 0 01.52-.972c3.632-1.102 8.147-.568 11.23 1.33a.779.779 0 01.257 1.07zm.105-2.835C14.692 8.95 9.375 8.775 6.297 9.71a.935.935 0 11-.543-1.79c3.532-1.072 9.404-.865 13.115 1.338a.935.935 0 01-.955 1.609z"/>
+              </svg>
+            </span>
+            <span class="p-service-name">Spotify</span>
+          </div>
           {% if spotify_connected %}
-            <p class="connected-label">✓ Подключён как {{ spotify_user }}</p>
+            <div class="platform-connected-info">
+              <span class="connected-ok">
+                <span class="connected-dot"></span>{{ spotify_user }}
+              </span>
+              <a href="/auth/spotify/logout" class="connected-logout">Отключить</a>
+            </div>
           {% else %}
-            <a href="/auth/spotify" class="btn btn-spotify">Войти через Spotify</a>
+            <a href="/auth/spotify" class="btn btn-spotify btn-platform">Подключить Spotify</a>
           {% endif %}
         </div>
 
-        <div class="card {% if yandex_connected %}card-done{% endif %}">
-          <div class="card-icon yandex-icon">Я</div>
-          <h2>Яндекс Музыка</h2>
+        <!-- Divider -->
+        <div class="platform-divider">
+          <div class="arrow-icon">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 5.5h10M10 2.5l3 3-3 3"/>
+              <path d="M13 10.5H3M6 7.5l-3 3 3 3"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Yandex -->
+        <div class="platform-side">
+          <span class="platform-label">Назначение</span>
+          <div class="platform-name">
+            <span class="p-icon yandex-icon">
+              <svg width="24" height="24" viewBox="0 0 144 144" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path fill="#000" d="m130.863 57.739-.468-2.327-19.788-3.457 11.498-15.557-1.337-1.462-16.913 8.11 2.139-21.54-1.738-.997-10.295 17.418L82.395 12H80.39l2.74 25.064-29.08-23.269-2.474.732 22.396 28.122-44.323-14.76-2.006 2.261L67.22 52.686l-54.618 4.521-.602 3.39 56.757 6.184-47.33 39.157 2.005 2.726 56.356-30.648-11.164 53.983h3.41l21.592-50.792 13.17 39.756 2.34-1.795-5.415-40.42 20.524 23.268 1.337-2.128-15.711-28.853 21.928 8.111.201-2.46-19.655-14.493 18.518-4.454Z"/>
+              </svg>
+            </span>
+            <span class="p-service-name">Яндекс Музыка</span>
+          </div>
           {% if yandex_connected %}
-            <p class="connected-label">✓ Подключён как {{ yandex_user }}</p>
+            <div class="platform-connected-info">
+              <span class="connected-ok">
+                <span class="connected-dot"></span>{{ yandex_user }}
+              </span>
+              <a href="/auth/yandex/logout" class="connected-logout">Отключить</a>
+            </div>
           {% else %}
             {% if yandex_oauth_enabled %}
-              <a href="/auth/yandex" class="btn btn-yandex">Войти через Яндекс</a>
+              <a href="/auth/yandex" class="btn btn-yandex btn-platform">Подключить Яндекс Музыку</a>
             {% else %}
-              <a href="/auth/yandex/login" class="btn btn-yandex">Войти через Яндекс</a>
+              <a href="/auth/yandex/login" class="btn btn-yandex btn-platform">Подключить Яндекс Музыку</a>
             {% endif %}
           {% endif %}
         </div>
@@ -61,92 +126,161 @@
     </section>
     {% endif %}
 
-    <!-- ── Yandex Music device auth ───────────────────── -->
+    <!-- ── Yandex Music device auth ─────────────────────── -->
     {% if spotify_connected and yandex_connected and not yandex_session_ready %}
-    <section class="connect-section" style="padding:16px 0">
-      <div class="card" style="max-width:480px;margin:0 auto" id="device-auth-card">
-        <h2 style="margin-bottom:8px">Подключить Яндекс Музыку</h2>
-        <p style="font-size:0.9em;color:#aaa;margin-bottom:16px">
-          Нажми кнопку — ты получишь короткий код для входа через сайт Яндекса (как на Smart TV).
-        </p>
+    <section class="connect-section">
+      <div class="auth-card" id="device-auth-card">
+        <h2>Войди в Яндекс Музыку</h2>
+        <p>Нажми кнопку — получишь код для входа на сайте Яндекса. Работает как вход на Smart TV.</p>
 
         <div id="da-start">
-          <button class="btn btn-yandex" style="width:100%" onclick="startDeviceAuth()">
-            Войти через Яндекс Музыку
+          <button class="btn btn-yandex" style="width:100%;padding:12px" onclick="startDeviceAuth()">
+            Получить код входа
           </button>
         </div>
 
-        <div id="da-loading" style="display:none;text-align:center;padding:16px 0;color:#aaa;font-size:0.9em">
-          Получаю код...
+        <div id="da-loading" style="display:none;font-size:0.85rem;color:var(--muted);padding:4px 0">
+          Запрашиваю код...
         </div>
 
-        <div id="da-code" style="display:none">
-          <p style="font-size:0.85em;color:#aaa;margin-bottom:8px">
-            1. Открой в браузере:
-            <a id="da-url" href="#" target="_blank" style="color:#ffcc00;word-break:break-all"></a>
+        <div id="da-code" style="display:none;display:flex;flex-direction:column;gap:12px">
+          <p>
+            Открой: <a id="da-url" href="#" target="_blank" style="color:var(--yandex);font-weight:600"></a>
           </p>
-          <p style="font-size:0.85em;color:#aaa;margin-bottom:4px">2. Введи код:</p>
-          <div id="da-user-code" style="font-size:2em;font-weight:bold;letter-spacing:0.15em;text-align:center;padding:12px;background:#111;border-radius:8px;margin-bottom:16px;font-family:monospace"></div>
-          <p style="font-size:0.8em;color:#888;text-align:center" id="da-status-label">Жду подтверждения...</p>
+          <p>Введи код:</p>
+          <div class="user-code-display" id="da-user-code"></div>
+          <p style="text-align:center;font-size:0.82rem;color:var(--muted)" id="da-status-label">
+            Ожидаю подтверждения...
+          </p>
         </div>
 
-        <div id="da-error" style="display:none;color:#e05;font-size:0.85em;margin-top:12px"></div>
+        <div id="da-error" style="display:none;font-size:0.85rem;color:var(--danger)"></div>
       </div>
     </section>
+    {% endif %}
 
-    <script>
+    <!-- ── Transfer ──────────────────────────────────────── -->
+    {% if spotify_connected and yandex_connected %}
+    <section class="transfer-section">
+      <h1>Перенести плейлист</h1>
+
+      <!-- Direction card (click swap arrows to change direction) -->
+      <div class="platform-card transfer-dir-card">
+        <div class="platform-side" id="dir-source-side">
+          <span class="platform-label" id="dir-source-label">Источник</span>
+          <div class="platform-name">
+            <span class="p-icon spotify-icon" id="dir-source-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.586 14.424a.622.622 0 01-.857.207c-2.348-1.435-5.304-1.76-8.785-.964a.622.622 0 01-.277-1.215c3.809-.87 7.076-.496 9.712 1.115a.622.622 0 01.207.857zm1.223-2.722a.779.779 0 01-1.07.257c-2.687-1.652-6.785-2.131-9.965-1.166a.778.778 0 01-.972-.519.779.779 0 01.52-.972c3.632-1.102 8.147-.568 11.23 1.33a.779.779 0 01.257 1.07zm.105-2.835C14.692 8.95 9.375 8.775 6.297 9.71a.935.935 0 11-.543-1.79c3.532-1.072 9.404-.865 13.115 1.338a.935.935 0 01-.955 1.609z"/>
+              </svg>
+            </span>
+            <span class="p-service-name" id="dir-source-name">Spotify</span>
+          </div>
+          <span class="dir-user-label" id="dir-source-user">{{ spotify_user }}</span>
+        </div>
+
+        <div class="platform-divider">
+          <button class="arrow-icon arrow-swap" id="swap-btn" title="Поменять направление">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 5.5h10M10 2.5l3 3-3 3"/>
+              <path d="M13 10.5H3M6 7.5l-3 3 3 3"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="platform-side" id="dir-dest-side">
+          <span class="platform-label" id="dir-dest-label">Назначение</span>
+          <div class="platform-name">
+            <span class="p-icon yandex-icon" id="dir-dest-icon">
+              <svg width="24" height="24" viewBox="0 0 144 144" fill="none">
+                <path fill="#000" d="m130.863 57.739-.468-2.327-19.788-3.457 11.498-15.557-1.337-1.462-16.913 8.11 2.139-21.54-1.738-.997-10.295 17.418L82.395 12H80.39l2.74 25.064-29.08-23.269-2.474.732 22.396 28.122-44.323-14.76-2.006 2.261L67.22 52.686l-54.618 4.521-.602 3.39 56.757 6.184-47.33 39.157 2.005 2.726 56.356-30.648-11.164 53.983h3.41l21.592-50.792 13.17 39.756 2.34-1.795-5.415-40.42 20.524 23.268 1.337-2.128-15.711-28.853 21.928 8.111.201-2.46-19.655-14.493 18.518-4.454Z"/>
+              </svg>
+            </span>
+            <span class="p-service-name" id="dir-dest-name">Яндекс Музыка</span>
+          </div>
+          <span class="dir-user-label" id="dir-dest-user">{{ yandex_user }}</span>
+        </div>
+      </div>
+
+      <div class="playlist-picker">
+        <label>Плейлист источника</label>
+        <select id="playlist-select">
+          <option value="">Загрузка...</option>
+        </select>
+      </div>
+
+      <button id="transfer-btn" class="btn btn-transfer" disabled>Начать перенос</button>
+    </section>
+
+    <!-- ── Progress ──────────────────────────────────────── -->
+    <section class="progress-section" id="progress-section" style="display:none">
+      <h2>Перенос</h2>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+      <p id="progress-label">Готовлюсь...</p>
+      <div id="track-list" class="track-list"></div>
+    </section>
+    {% endif %}
+
+  </div><!-- #left-col -->
+
+  <!-- Summary panel — moves to right column when done -->
+  <div id="summary" class="summary" style="display:none"></div>
+
+  </main>
+
+  <script>
+    // Theme toggle
+    const html = document.documentElement;
+    const themeBtn = document.getElementById('theme-toggle');
+    const iconSun  = document.getElementById('icon-sun');
+    const iconMoon = document.getElementById('icon-moon');
+
+    function applyTheme(t) {
+      html.setAttribute('data-theme', t);
+      iconSun.style.display  = t === 'dark'  ? 'block' : 'none';
+      iconMoon.style.display = t === 'light' ? 'block' : 'none';
+      localStorage.setItem('theme', t);
+    }
+    applyTheme(localStorage.getItem('theme') || 'dark');
+    themeBtn.addEventListener('click', () =>
+      applyTheme(html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark')
+    );
+
+    // Device auth
     async function startDeviceAuth() {
-      document.getElementById('da-start').style.display = 'none';
+      document.getElementById('da-start').style.display   = 'none';
       document.getElementById('da-loading').style.display = 'block';
-      document.getElementById('da-error').style.display = 'none';
-
+      document.getElementById('da-error').style.display   = 'none';
       let job_id;
       try {
         const res = await fetch('/auth/yandex/device/start', { method: 'POST' });
         ({ job_id } = await res.json());
-      } catch (e) {
-        showDAError('Ошибка запуска: ' + e.message);
-        return;
-      }
-
+      } catch (e) { showDAError('Ошибка: ' + e.message); return; }
       pollDeviceAuth(job_id);
     }
 
     async function pollDeviceAuth(job_id) {
       try {
-        const res = await fetch('/auth/yandex/device/status/' + job_id);
-        const job = await res.json();
-
+        const job = await fetch('/auth/yandex/device/status/' + job_id).then(r => r.json());
         if (job.status === 'awaiting_user' && job.code_info) {
           document.getElementById('da-loading').style.display = 'none';
-          const ci = job.code_info;
-          document.getElementById('da-url').href = ci.verification_url;
-          document.getElementById('da-url').textContent = ci.verification_url;
-          document.getElementById('da-user-code').textContent = ci.user_code;
-          document.getElementById('da-code').style.display = 'block';
+          document.getElementById('da-url').href = job.code_info.verification_url;
+          document.getElementById('da-url').textContent = job.code_info.verification_url;
+          document.getElementById('da-user-code').textContent = job.code_info.user_code;
+          document.getElementById('da-code').style.display = 'flex';
         }
-
         if (job.status === 'done') {
           document.getElementById('da-status-label').textContent = 'Подтверждено! Сохраняю...';
-          const r = await fetch('/auth/yandex/device/confirm/' + job_id, { method: 'POST' });
-          const data = await r.json();
-          if (data.ok) {
-            window.location.href = '/';
-          } else {
-            showDAError('Ошибка сохранения: ' + (data.error || ''));
-          }
+          const data = await fetch('/auth/yandex/device/confirm/' + job_id, { method: 'POST' }).then(r => r.json());
+          if (data.ok) window.location.href = '/';
+          else showDAError('Ошибка: ' + (data.error || ''));
           return;
         }
-
-        if (job.status === 'error') {
-          showDAError('Ошибка: ' + (job.error || 'неизвестная ошибка'));
-          return;
-        }
-
+        if (job.status === 'error') { showDAError(job.error || 'Неизвестная ошибка'); return; }
         setTimeout(() => pollDeviceAuth(job_id), 3000);
-      } catch (e) {
-        showDAError('Ошибка опроса: ' + e.message);
-      }
+      } catch (e) { showDAError('Ошибка: ' + e.message); }
     }
 
     function showDAError(msg) {
@@ -156,50 +290,7 @@
       el.textContent = msg;
       el.style.display = 'block';
     }
-    </script>
-    {% endif %}
-
-    <!-- ── Transfer section ────────────────────────────── -->
-    {% if spotify_connected and yandex_connected %}
-    <section class="transfer-section">
-      <h1>Перенести плейлист</h1>
-
-      <div class="direction-toggle">
-        <button class="dir-btn active" data-dir="spotify_to_yandex">
-          Spotify → Яндекс
-        </button>
-        <button class="dir-btn" data-dir="yandex_to_spotify">
-          Яндекс → Spotify
-        </button>
-      </div>
-
-      <div class="playlist-picker">
-        <label>Выбери плейлист:</label>
-        <select id="playlist-select">
-          <option value="">Загрузка...</option>
-        </select>
-      </div>
-
-      <button id="transfer-btn" class="btn btn-transfer" disabled>
-        Начать перенос
-      </button>
-    </section>
-
-    <!-- ── Progress section ────────────────────────────── -->
-    <section class="progress-section" id="progress-section" style="display:none">
-      <h2>Перенос</h2>
-      <div class="progress-bar-wrap">
-        <div class="progress-bar" id="progress-bar"></div>
-      </div>
-      <p id="progress-label">Готовлюсь...</p>
-
-      <div id="track-list" class="track-list"></div>
-
-      <div id="summary" class="summary" style="display:none"></div>
-    </section>
-    {% endif %}
-
-  </main>
+  </script>
 
   <script>
     const SPOTIFY_CONNECTED = {{ 'true' if spotify_connected else 'false' }};

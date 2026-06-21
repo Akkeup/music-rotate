@@ -4,6 +4,7 @@ if (!SPOTIFY_CONNECTED || !YANDEX_CONNECTED) {
   let direction = "spotify_to_yandex";
   let total = 0;
   let processed = 0;
+  let playlistReqId = 0; // for cancelling stale requests
 
   const select    = document.getElementById("playlist-select");
   const btn       = document.getElementById("transfer-btn");
@@ -12,36 +13,89 @@ if (!SPOTIFY_CONNECTED || !YANDEX_CONNECTED) {
   const progLabel = document.getElementById("progress-label");
   const trackList = document.getElementById("track-list");
   const summary   = document.getElementById("summary");
+  const swapBtn   = document.getElementById("swap-btn");
 
-  // ── Direction toggle ──────────────────────────────────
+  const spotifyIconSVG = `<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.586 14.424a.622.622 0 01-.857.207c-2.348-1.435-5.304-1.76-8.785-.964a.622.622 0 01-.277-1.215c3.809-.87 7.076-.496 9.712 1.115a.622.622 0 01.207.857zm1.223-2.722a.779.779 0 01-1.07.257c-2.687-1.652-6.785-2.131-9.965-1.166a.778.778 0 01-.972-.519.779.779 0 01.52-.972c3.632-1.102 8.147-.568 11.23 1.33a.779.779 0 01.257 1.07zm.105-2.835C14.692 8.95 9.375 8.775 6.297 9.71a.935.935 0 11-.543-1.79c3.532-1.072 9.404-.865 13.115 1.338a.935.935 0 01-.955 1.609z"/>
+  </svg>`;
 
-  document.querySelectorAll(".dir-btn").forEach(b => {
-    b.addEventListener("click", () => {
-      document.querySelectorAll(".dir-btn").forEach(x => x.classList.remove("active"));
-      b.classList.add("active");
-      direction = b.dataset.dir;
+  const yandexIconSVG = `<svg width="24" height="24" viewBox="0 0 144 144" fill="none">
+    <path fill="#000" d="m130.863 57.739-.468-2.327-19.788-3.457 11.498-15.557-1.337-1.462-16.913 8.11 2.139-21.54-1.738-.997-10.295 17.418L82.395 12H80.39l2.74 25.064-29.08-23.269-2.474.732 22.396 28.122-44.323-14.76-2.006 2.261L67.22 52.686l-54.618 4.521-.602 3.39 56.757 6.184-47.33 39.157 2.005 2.726 56.356-30.648-11.164 53.983h3.41l21.592-50.792 13.17 39.756 2.34-1.795-5.415-40.42 20.524 23.268 1.337-2.128-15.711-28.853 21.928 8.111.201-2.46-19.655-14.493 18.518-4.454Z"/>
+  </svg>`;
+
+  // Static service info (read user names once from DOM)
+  const spotifyUser = document.getElementById("dir-source-user") ? document.getElementById("dir-source-user").textContent.trim() : "";
+  const yandexUser  = document.getElementById("dir-dest-user")   ? document.getElementById("dir-dest-user").textContent.trim()   : "";
+
+  const SERVICES = {
+    spotify: { name: "Spotify",       iconClass: "spotify-icon", iconHTML: spotifyIconSVG, user: spotifyUser },
+    yandex:  { name: "Яндекс Музыка", iconClass: "yandex-icon",  iconHTML: yandexIconSVG,  user: yandexUser  },
+  };
+
+  // ── Direction card ────────────────────────────────────
+
+  function updateDirectionCard() {
+    const src = direction === "spotify_to_yandex" ? "spotify" : "yandex";
+    const dst = direction === "spotify_to_yandex" ? "yandex"  : "spotify";
+
+    ["source", "dest"].forEach((role, i) => {
+      const svc = i === 0 ? SERVICES[src] : SERVICES[dst];
+      const icon = document.getElementById(`dir-${role}-icon`);
+      const name = document.getElementById(`dir-${role}-name`);
+      const user = document.getElementById(`dir-${role}-user`);
+      if (icon) { icon.className = `p-icon ${svc.iconClass}`; icon.innerHTML = svc.iconHTML; }
+      if (name) name.textContent = svc.name;
+      if (user) user.textContent = svc.user;
+    });
+
+    document.body.classList.remove("dir-s2y", "dir-y2s");
+    document.body.classList.add(direction === "spotify_to_yandex" ? "dir-s2y" : "dir-y2s");
+  }
+
+  updateDirectionCard();
+
+  // Swap button
+  const swapBtnEl = document.getElementById("swap-btn");
+  if (swapBtnEl) {
+    swapBtnEl.addEventListener("click", function() {
+      direction = direction === "spotify_to_yandex" ? "yandex_to_spotify" : "spotify_to_yandex";
+      updateDirectionCard();
       loadPlaylists();
     });
-  });
+  }
 
   // ── Load playlists ────────────────────────────────────
 
   async function loadPlaylists() {
+    const reqId = ++playlistReqId;
     select.innerHTML = "<option>Загрузка...</option>";
+    select.disabled = true;
     btn.disabled = true;
 
     const source = direction === "spotify_to_yandex" ? "spotify" : "yandex";
     try {
-      const res = await fetch(`/api/playlists/${source}`);
+      const res  = await fetch(`/api/playlists/${source}`);
       const data = await res.json();
+
+      // Ignore stale responses if direction changed while loading
+      if (reqId !== playlistReqId) return;
+
       if (data.error) throw new Error(data.error);
 
-      select.innerHTML = data.playlists
+      // Filter out playlists created by this tool
+      const filtered = data.playlists.filter(p =>
+        !(source === "yandex"   && p.name.includes("(from Spotify)")) &&
+        !(source === "spotify"  && p.name.includes("(from Yandex)"))
+      );
+
+      select.innerHTML = filtered
         .map(p => `<option value="${p.id}" data-name="${esc(p.name)}">${esc(p.name)} (${p.count})</option>`)
         .join("");
+      select.disabled = false;
       btn.disabled = false;
     } catch (e) {
-      select.innerHTML = `<option>Ошибка: ${e.message}</option>`;
+      if (reqId !== playlistReqId) return;
+      select.innerHTML = `<option>Ошибка: ${esc(e.message)}</option>`;
     }
   }
 
@@ -56,18 +110,18 @@ if (!SPOTIFY_CONNECTED || !YANDEX_CONNECTED) {
     const playlist_id   = opt.value;
     const playlist_name = opt.dataset.name;
 
-    // Reset UI
     trackList.innerHTML = "";
     summary.style.display = "none";
     progBar.style.width = "0%";
+    progBar.style.background = "";
     progLabel.textContent = "Подключаюсь...";
     progSec.style.display = "block";
     btn.disabled = true;
     total = processed = 0;
+    document.getElementById("main").classList.remove("layout-done");
 
     progSec.scrollIntoView({ behavior: "smooth", block: "start" });
 
-    // Start job
     let job_id;
     try {
       const res = await fetch("/api/transfer", {
@@ -82,7 +136,6 @@ if (!SPOTIFY_CONNECTED || !YANDEX_CONNECTED) {
       return;
     }
 
-    // Listen to SSE stream
     const es = new EventSource(`/api/transfer/${job_id}/stream`);
 
     es.onmessage = (e) => {
@@ -111,7 +164,10 @@ if (!SPOTIFY_CONNECTED || !YANDEX_CONNECTED) {
       }
 
       if (msg.type === "error") {
+        es.close();
+        progBar.style.background = "var(--danger)";
         progLabel.textContent = "Ошибка: " + msg.message;
+        btn.disabled = false;
       }
 
       if (msg.type === "done") {
@@ -120,6 +176,7 @@ if (!SPOTIFY_CONNECTED || !YANDEX_CONNECTED) {
         progLabel.textContent = "Готово!";
         btn.disabled = false;
         showSummary(msg);
+        document.getElementById("main").classList.add("layout-done");
       }
     };
 
@@ -134,7 +191,7 @@ if (!SPOTIFY_CONNECTED || !YANDEX_CONNECTED) {
 
   function showSummary(msg) {
     let html = `
-      <h3>Итог переноса</h3>
+      <h3>Итог</h3>
       <div class="stat"><span>Найдено и добавлено</span><strong>${msg.found}</strong></div>
       <div class="stat"><span>Не найдено</span><strong>${msg.not_found}</strong></div>
     `;
