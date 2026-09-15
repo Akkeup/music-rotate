@@ -126,35 +126,22 @@
     </section>
     {% endif %}
 
-    <!-- ── Yandex Music device auth ─────────────────────── -->
+    <!-- ── Yandex Music token auth ──────────────────────── -->
     {% if spotify_connected and yandex_connected and not yandex_session_ready %}
     <section class="connect-section">
-      <div class="auth-card" id="device-auth-card">
+      <div class="auth-card">
         <h2>Войди в Яндекс Музыку</h2>
-        <p>Нажми кнопку — получишь код для входа на сайте Яндекса. Работает как вход на Smart TV.</p>
+        <p>Нужен отдельный токен Яндекс Музыки. Открой страницу токена, войди в тот же аккаунт и скопируй значение после <code>access_token=</code> из адресной строки.</p>
 
-        <div id="da-start">
-          <button class="btn btn-yandex" style="width:100%;padding:12px" onclick="startDeviceAuth()">
-            Получить код входа
-          </button>
-        </div>
+        <a class="btn btn-yandex btn-platform" href="/auth/yandex/music-oauth-open" target="_blank" rel="noreferrer">
+          Открыть страницу токена
+        </a>
 
-        <div id="da-loading" style="display:none;font-size:0.85rem;color:var(--muted);padding:4px 0">
-          Запрашиваю код...
-        </div>
-
-        <div id="da-code" style="display:none;display:flex;flex-direction:column;gap:12px">
-          <p>
-            Открой: <a id="da-url" href="#" target="_blank" style="color:var(--yandex);font-weight:600"></a>
-          </p>
-          <p>Введи код:</p>
-          <div class="user-code-display" id="da-user-code"></div>
-          <p style="text-align:center;font-size:0.82rem;color:var(--muted)" id="da-status-label">
-            Ожидаю подтверждения...
-          </p>
-        </div>
-
-        <div id="da-error" style="display:none;font-size:0.85rem;color:var(--danger)"></div>
+        <form class="token-form" method="post" action="/auth/yandex/music-token">
+          <label for="yandex-music-token">Токен Яндекс Музыки</label>
+          <textarea id="yandex-music-token" name="token" rows="4" placeholder="access_token=... или только сам токен" required></textarea>
+          <button class="btn btn-yandex btn-platform" type="submit">Сохранить токен</button>
+        </form>
       </div>
     </section>
     {% endif %}
@@ -248,48 +235,6 @@
       applyTheme(html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark')
     );
 
-    // Device auth
-    async function startDeviceAuth() {
-      document.getElementById('da-start').style.display   = 'none';
-      document.getElementById('da-loading').style.display = 'block';
-      document.getElementById('da-error').style.display   = 'none';
-      let job_id;
-      try {
-        const res = await fetch('/auth/yandex/device/start', { method: 'POST' });
-        ({ job_id } = await res.json());
-      } catch (e) { showDAError('Ошибка: ' + e.message); return; }
-      pollDeviceAuth(job_id);
-    }
-
-    async function pollDeviceAuth(job_id) {
-      try {
-        const job = await fetch('/auth/yandex/device/status/' + job_id).then(r => r.json());
-        if (job.status === 'awaiting_user' && job.code_info) {
-          document.getElementById('da-loading').style.display = 'none';
-          document.getElementById('da-url').href = job.code_info.verification_url;
-          document.getElementById('da-url').textContent = job.code_info.verification_url;
-          document.getElementById('da-user-code').textContent = job.code_info.user_code;
-          document.getElementById('da-code').style.display = 'flex';
-        }
-        if (job.status === 'done') {
-          document.getElementById('da-status-label').textContent = 'Подтверждено! Сохраняю...';
-          const data = await fetch('/auth/yandex/device/confirm/' + job_id, { method: 'POST' }).then(r => r.json());
-          if (data.ok) window.location.href = '/';
-          else showDAError('Ошибка: ' + (data.error || ''));
-          return;
-        }
-        if (job.status === 'error') { showDAError(job.error || 'Неизвестная ошибка'); return; }
-        setTimeout(() => pollDeviceAuth(job_id), 3000);
-      } catch (e) { showDAError('Ошибка: ' + e.message); }
-    }
-
-    function showDAError(msg) {
-      document.getElementById('da-loading').style.display = 'none';
-      document.getElementById('da-start').style.display = 'block';
-      const el = document.getElementById('da-error');
-      el.textContent = msg;
-      el.style.display = 'block';
-    }
   </script>
 
   <script>

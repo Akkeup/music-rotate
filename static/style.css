@@ -425,6 +425,39 @@ body.dir-y2s { --accent-rgb: 255,204,0; }
 
 .auth-card h2 { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.3px; }
 .auth-card p  { font-size: 0.875rem; color: var(--muted); line-height: 1.6; }
+.auth-card code { color: var(--text); font-size: 0.82rem; }
+
+.token-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.token-form label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.token-form textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  background: var(--card2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.token-form textarea:focus {
+  outline: none;
+  border-color: var(--yandex);
+}
 
 .user-code-display {
   font-family: "SF Mono", "Fira Code", ui-monospace, monospace;

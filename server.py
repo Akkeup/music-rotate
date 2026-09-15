@@ -3,6 +3,7 @@ import os
 import secrets
 import uuid
 import asyncio
+from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -40,8 +41,9 @@ templates = Jinja2Templates(directory="templates")
 
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/auth/spotify/callback")
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8000/auth/spotify/callback")
 SPOTIFY_SCOPE = "playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public"
+SPOTIFY_HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
 YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "")
 YANDEX_CLIENT_SECRET = os.getenv("YANDEX_CLIENT_SECRET", "")
@@ -49,6 +51,38 @@ YANDEX_REDIRECT_URI = os.getenv("YANDEX_REDIRECT_URI", "http://127.0.0.1:8000/au
 
 jobs: dict = {}
 device_auth_jobs: dict = {}  # job_id -> {status, code_info, token, error}
+
+
+def _error_redirect(message: str, status_code: int = 303):
+    return RedirectResponse(f"/?{urlencode({'error': message})}", status_code=status_code)
+
+
+def _response_json(resp: httpx.Response, label: str):
+    try:
+        return resp.json()
+    except ValueError:
+        body = (resp.text or "").strip()
+        print(f"[{label}] non-json response: status={resp.status_code}, body={body[:500]}", flush=True)
+        return None
+
+
+def _oauth_error(resp: httpx.Response, data):
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            return err.get("message") or err.get("reason") or str(err)
+        if isinstance(err, str):
+            desc = data.get("error_description") or data.get("message")
+            return f"{err}: {desc}" if desc else err
+        if data.get("error_description"):
+            return data["error_description"]
+    body = (resp.text or "").strip()
+    return body[:300] if body else f"HTTP {resp.status_code}"
+
+
+def _clear_spotify_session(request: Request):
+    for key in ("spotify_token", "spotify_refresh", "spotify_user"):
+        request.session.pop(key, None)
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
@@ -73,13 +107,22 @@ async def _refresh_spotify_token(request: Request):
     refresh = request.session.get("spotify_refresh")
     if not refresh:
         return None
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            "https://accounts.spotify.com/api/token",
-            data={"grant_type": "refresh_token", "refresh_token": refresh},
-            auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
-        )
-    data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=SPOTIFY_HTTP_TIMEOUT) as client:
+            resp = await client.post(
+                "https://accounts.spotify.com/api/token",
+                data={"grant_type": "refresh_token", "refresh_token": refresh},
+                auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
+            )
+    except httpx.RequestError as e:
+        print(f"[SPOTIFY REFRESH] request failed: {e}", flush=True)
+        return None
+    data = _response_json(resp, "SPOTIFY REFRESH")
+    if not data:
+        return None
+    if resp.status_code >= 400:
+        print(f"[SPOTIFY REFRESH] failed: {_oauth_error(resp, data)}", flush=True)
+        return None
     if "access_token" not in data:
         return None
     request.session["spotify_token"] = data["access_token"]
@@ -92,42 +135,86 @@ async def _refresh_spotify_token(request: Request):
 
 @app.get("/auth/spotify")
 async def spotify_auth(request: Request):
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        return _error_redirect("spotify_not_configured")
     state = secrets.token_hex(16)
     request.session["spotify_state"] = state
-    params = "&".join([
-        f"client_id={SPOTIFY_CLIENT_ID}",
-        "response_type=code",
-        f"redirect_uri={SPOTIFY_REDIRECT_URI}",
-        f"scope={SPOTIFY_SCOPE.replace(' ', '%20')}",
-        f"state={state}",
-        "show_dialog=true",
-    ])
+    params = urlencode({
+        "client_id": SPOTIFY_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": SPOTIFY_REDIRECT_URI,
+        "scope": SPOTIFY_SCOPE,
+        "state": state,
+        "show_dialog": "true",
+    })
     return RedirectResponse(f"https://accounts.spotify.com/authorize?{params}")
 
 
 @app.get("/auth/spotify/callback")
-async def spotify_callback(request: Request, code: str = None, error: str = None):
+async def spotify_callback(request: Request, code: str = None, error: str = None, state: str = None):
     if error or not code:
-        return RedirectResponse("/?error=spotify_denied")
+        return _error_redirect("spotify_denied")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://accounts.spotify.com/api/token",
-            data={"grant_type": "authorization_code", "code": code, "redirect_uri": SPOTIFY_REDIRECT_URI},
-            auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
-        )
-    tokens = resp.json()
+    expected_state = request.session.pop("spotify_state", None)
+    if not expected_state or state != expected_state:
+        return _error_redirect("spotify_state_mismatch")
+
+    try:
+        async with httpx.AsyncClient(timeout=SPOTIFY_HTTP_TIMEOUT) as client:
+            resp = await client.post(
+                "https://accounts.spotify.com/api/token",
+                data={"grant_type": "authorization_code", "code": code, "redirect_uri": SPOTIFY_REDIRECT_URI},
+                auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
+            )
+    except httpx.TimeoutException as e:
+        print(f"[SPOTIFY TOKEN] timeout: {e}", flush=True)
+        return _error_redirect("spotify_token_timeout")
+    except httpx.RequestError as e:
+        print(f"[SPOTIFY TOKEN] request failed: {e}", flush=True)
+        return _error_redirect("spotify_token_request_failed")
+
+    tokens = _response_json(resp, "SPOTIFY TOKEN")
+    if not tokens:
+        return _error_redirect("spotify_token_bad_response")
+    if resp.status_code >= 400:
+        message = _oauth_error(resp, tokens)
+        print(f"[SPOTIFY TOKEN] failed: {message}", flush=True)
+        return _error_redirect(f"spotify_token_failed: {message}")
     if "access_token" not in tokens:
-        return RedirectResponse("/?error=spotify_token_failed")
+        print(f"[SPOTIFY TOKEN] access_token missing: {tokens}", flush=True)
+        return _error_redirect("spotify_token_missing")
 
     token = tokens["access_token"]
+
+    try:
+        async with httpx.AsyncClient(timeout=SPOTIFY_HTTP_TIMEOUT) as client:
+            me_resp = await client.get(
+                "https://api.spotify.com/v1/me",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.TimeoutException as e:
+        print(f"[SPOTIFY ME] timeout: {e}", flush=True)
+        _clear_spotify_session(request)
+        return _error_redirect("spotify_profile_timeout")
+    except httpx.RequestError as e:
+        print(f"[SPOTIFY ME] request failed: {e}", flush=True)
+        _clear_spotify_session(request)
+        return _error_redirect("spotify_profile_request_failed")
+
+    me = _response_json(me_resp, "SPOTIFY ME")
+    if not me:
+        _clear_spotify_session(request)
+        message = _oauth_error(me_resp, None)
+        return _error_redirect(f"spotify_profile_failed: {message}")
+    if me_resp.status_code >= 400:
+        message = _oauth_error(me_resp, me)
+        print(f"[SPOTIFY ME] failed: {message}", flush=True)
+        _clear_spotify_session(request)
+        return _error_redirect(f"spotify_profile_failed: {message}")
     request.session["spotify_token"] = token
     request.session["spotify_refresh"] = tokens.get("refresh_token", "")
-
-    async with httpx.AsyncClient() as client:
-        me = (await client.get("https://api.spotify.com/v1/me", headers={"Authorization": f"Bearer {token}"})).json()
     request.session["spotify_user"] = me.get("display_name") or me.get("id", "Spotify")
-    return RedirectResponse("/")
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/auth/spotify/logout")
@@ -337,6 +424,12 @@ async def yandex_music_oauth_url():
     return {"url": url}
 
 
+@app.get("/auth/yandex/music-oauth-open")
+async def yandex_music_oauth_open():
+    url = "https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d"
+    return RedirectResponse(url)
+
+
 @app.post("/auth/yandex/music-token")
 async def yandex_set_music_token(request: Request):
     form = await request.form()
@@ -447,21 +540,30 @@ async def spotify_playlists(request: Request):
 
     try:
         playlists, url, refreshed = [], "https://api.spotify.com/v1/me/playlists?limit=50", False
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=SPOTIFY_HTTP_TIMEOUT) as client:
             while url:
                 headers = {"Authorization": f"Bearer {token}"}
                 resp = await client.get(url, headers=headers)
-                data = resp.json()
-                if "error" in data:
-                    err = data["error"]
+                data = _response_json(resp, "SPOTIFY PLAYLISTS")
+                if not data:
+                    message = _oauth_error(resp, None)
+                    if resp.status_code in (401, 403):
+                        _clear_spotify_session(request)
+                        return JSONResponse({"error": message}, status_code=401)
+                    return JSONResponse({"error": message}, status_code=502)
+                if resp.status_code >= 400 or "error" in data:
+                    err = data.get("error") if isinstance(data, dict) else None
                     status = err.get("status") if isinstance(err, dict) else resp.status_code
                     if status == 401 and not refreshed:
                         token = await _refresh_spotify_token(request)
                         if not token:
+                            _clear_spotify_session(request)
                             return JSONResponse({"error": "Токен истёк, войди заново через Spotify"}, status_code=401)
                         refreshed = True
                         continue
-                    msg = err.get("message") if isinstance(err, dict) else str(err)
+                    msg = _oauth_error(resp, data)
+                    if status in (401, 403):
+                        _clear_spotify_session(request)
                     return JSONResponse({"error": msg}, status_code=400)
                 for p in data.get("items", []):
                     if p:
@@ -469,8 +571,14 @@ async def spotify_playlists(request: Request):
                         playlists.append({"id": p["id"], "name": p["name"], "count": (tracks_info or {}).get("total", 0)})
                 url = data.get("next")
         return {"playlists": playlists}
+    except httpx.TimeoutException as e:
+        print(f"[spotify_playlists] TIMEOUT: {e}", flush=True)
+        return JSONResponse({"error": "Spotify API timeout"}, status_code=504)
+    except httpx.RequestError as e:
+        print(f"[spotify_playlists] REQUEST ERROR: {e}", flush=True)
+        return JSONResponse({"error": f"Spotify API request failed: {e}"}, status_code=502)
     except Exception as e:
-        print(f"[spotify_playlists] ERROR: {e}")
+        print(f"[spotify_playlists] ERROR: {e}", flush=True)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
