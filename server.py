@@ -287,68 +287,76 @@ async def yandex_token_direct(request: Request):
         return RedirectResponse(f"/?error={quote(str(e)[:200])}", status_code=303)
 
 
-async def _save_yandex_session(request: Request, token: str):
-    def _init():
-        return YMClient(token).init()
-    ym = await asyncio.to_thread(_init)
-    request.session["yandex_token"] = token
+async def _get_yandex_account_info(token: str):
+    """
+    Получает базовую информацию аккаунта через Passport API.
+    Не использует yandex-music SDK.
+    """
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            "https://login.yandex.ru/info",
+            params={"format": "json"},
+            headers={"Authorization": f"OAuth {token}"},
+        )
 
-    uid = ym.me.account.uid if ym.me and ym.me.account else None
-    login = ym.me.account.login if ym.me and ym.me.account else None
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+
+    if resp.status_code >= 400:
+        message = (
+            data.get("error_description")
+            or data.get("error")
+            or f"HTTP {resp.status_code}"
+        )
+        raise RuntimeError(f"Yandex OAuth: {message}")
+
+    return data
+
+
+async def _save_yandex_session(request: Request, token: str):
+    """
+    Сохраняет обычный Yandex OAuth token.
+
+    ВАЖНО:
+    здесь больше нет YMClient(token).init().
+    Это специально, чтобы не попадать в ошибку
+    common_period_duration.
+    """
+    token = (token or "").strip()
+
+    if not token:
+        raise ValueError("Пустой токен Яндекса")
+
+    info = await _get_yandex_account_info(token)
+
+    uid = info.get("id")
+    login = (
+        info.get("login")
+        or info.get("display_name")
+        or info.get("real_name")
+    )
 
     if not uid:
-        async with httpx.AsyncClient(timeout=10) as client:
-            info = (await client.get(
-                "https://login.yandex.ru/info?format=json",
-                headers={"Authorization": f"OAuth {token}"}
-            )).json()
-        uid = info.get("id")
-        login = login or info.get("login") or info.get("display_name")
+        raise RuntimeError(
+            "Не удалось определить ID пользователя Яндекса"
+        )
 
-    request.session["yandex_uid"] = str(uid) if uid else None
+    uid = str(uid)
+
+    request.session["yandex_token"] = token
+    request.session["yandex_uid"] = uid
     request.session["yandex_user"] = login or "Яндекс"
 
-    # Try to restore saved music token
-    if uid:
-        saved = _load_ym_tokens().get(str(uid))
-        if saved:
-            request.session["yandex_music_token"] = saved
-            request.session.pop("yandex_session_id", None)
-            return
+    # Если для этого аккаунта уже сохранён токен Яндекс Музыки —
+    # восстанавливаем его.
+    saved_tokens = _load_ym_tokens()
+    saved_music_token = saved_tokens.get(uid)
 
-    # Try to auto-exchange OAuth token for a Yandex Music token via mobile proxy
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            for client_id, client_secret in [
-                ("c0ebe342af7d48fbbbfcf2d2eedb8f9e", "ad0a908f0aa341a182a37ecd75bc319e"),
-                ("23cabbbdc6cd418abb4b39c32c41195d", "53bc75238f0c4d08a118e51fe9203300"),
-            ]:
-                resp = await client.post(
-                    "https://mobileproxy.passport.yandex.net/1/bundle/oauth/token_by_sessionid",
-                    data={"client_id": client_id, "client_secret": client_secret},
-                    headers={
-                        "Ya-Client-Host": "passport.yandex.ru",
-                        "Ya-Client-Cookie": f"Session_id={token}",
-                        "Authorization": f"OAuth {token}",
-                    },
-                )
-                data = resp.json()
-                music_token = data.get("access_token")
-                if music_token:
-                    request.session["yandex_music_token"] = music_token
-                    if uid:
-                        _save_ym_token(str(uid), music_token)
-                    return
-    except Exception as e:
-        print(f"[YM auto token] failed: {e}", flush=True)
-
-
-@app.get("/auth/yandex/login")
-async def yandex_login_form(request: Request):
-    return templates.TemplateResponse("yandex_login.html", {
-        "request": request,
-        "error": request.query_params.get("error", ""),
-    })
+    if saved_music_token:
+        request.session["yandex_music_token"] = saved_music_token
+        request.session.pop("yandex_session_id", None)
 
 
 @app.post("/auth/yandex/login")
@@ -434,34 +442,82 @@ async def yandex_music_oauth_open():
 async def yandex_set_music_token(request: Request):
     form = await request.form()
     raw = (form.get("token") or "").strip()
-    # Accept full fragment string like "access_token=TOKEN&token_type=bearer&..."
+
+    # Можно вставить:
+    # access_token=XXXX&token_type=bearer...
     import re
-    m = re.search(r"access_token=([^&\s]+)", raw)
-    token = m.group(1) if m else raw
+
+    match = re.search(r"access_token=([^&\s]+)", raw)
+    token = match.group(1) if match else raw
+
+    token = token.strip()
 
     if not token:
-        return RedirectResponse("/?error=empty_token", status_code=303)
+        return RedirectResponse(
+            "/?error=empty_token",
+            status_code=303,
+        )
 
     try:
-        def _init():
-            return YMClient(token).init()
-        ym = await asyncio.to_thread(_init)
-        uid = str(ym.me.account.uid) if (ym.me and ym.me.account) else None
-        login = ym.me.account.login if (ym.me and ym.me.account) else None
+        # Обычно uid уже есть после авторизации Яндекса.
+        uid = request.session.get("yandex_uid")
+        login = request.session.get("yandex_user")
 
-        request.session["yandex_token"] = token
+        # Если uid ещё нет — пробуем определить его
+        # через обычный Yandex OAuth token.
+        if not uid:
+            yandex_oauth_token = request.session.get("yandex_token")
+
+            if yandex_oauth_token:
+                info = await _get_yandex_account_info(
+                    yandex_oauth_token
+                )
+
+                uid = info.get("id")
+                login = (
+                    info.get("login")
+                    or info.get("display_name")
+                    or login
+                )
+
+        if not uid:
+            raise RuntimeError(
+                "Сначала войди в аккаунт Яндекса, "
+                "затем добавь токен Яндекс Музыки."
+            )
+
+        uid = str(uid)
+
+        # Сохраняем Music OAuth token.
         request.session["yandex_music_token"] = token
         request.session["yandex_uid"] = uid
         request.session["yandex_user"] = login or "Яндекс"
-        request.session.pop("yandex_session_id", None)  # cookies no longer needed
 
-        if uid:
-            _save_ym_token(uid, token)
+        # Для совместимости с существующей логикой приложения.
+        request.session["yandex_token"] = (
+            request.session.get("yandex_token") or token
+        )
 
-        return RedirectResponse("/", status_code=303)
+        request.session.pop("yandex_session_id", None)
+
+        _save_ym_token(uid, token)
+
+        return RedirectResponse(
+            "/",
+            status_code=303,
+        )
+
     except Exception as e:
+        import traceback
         from urllib.parse import quote
-        return RedirectResponse(f"/?error={quote(str(e)[:200])}", status_code=303)
+
+        print(f"[YANDEX MUSIC TOKEN ERROR] {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
+
+        return RedirectResponse(
+            f"/?error={quote(str(e)[:300])}",
+            status_code=303,
+        )
 
 
 @app.post("/auth/yandex/device/start")
@@ -585,51 +641,131 @@ async def spotify_playlists(request: Request):
 @app.get("/api/playlists/yandex")
 async def yandex_playlists(request: Request):
     token = request.session.get("yandex_token")
+
     if not token:
-        return JSONResponse({"error": "not_connected"}, status_code=401)
+        return JSONResponse(
+            {"error": "not_connected"},
+            status_code=401,
+        )
 
     music_token = request.session.get("yandex_music_token")
     session_id = request.session.get("yandex_session_id")
     uid = request.session.get("yandex_uid")
 
-    auth_header = None
-    if music_token:
-        auth_header = {"Authorization": f"OAuth {music_token}"}
-    elif session_id:
-        auth_header = _ym_headers(session_id)
+    if not uid:
+        return JSONResponse(
+            {
+                "error": (
+                    "Не удалось определить пользователя Яндекса. "
+                    "Войди заново."
+                )
+            },
+            status_code=401,
+        )
 
-    if auth_header and uid:
-        try:
-            import requests as req
-            r = req.get(
-                f"https://api.music.yandex.ru/users/{uid}/playlists/list",
-                headers=auth_header,
-                timeout=15,
-            ).json()
-            if "result" in r:
-                return {"playlists": [
-                    {"id": str(p["kind"]), "name": p["title"], "count": p.get("trackCount", 0)}
-                    for p in r["result"]
-                ]}
-        except Exception as e:
-            print(f"[yandex_playlists] direct API failed: {e}")
+    if not music_token and not session_id:
+        return JSONResponse(
+            {
+                "error": (
+                    "Не подключён Яндекс Музыка. "
+                    "Добавь отдельный токен Яндекс Музыки."
+                )
+            },
+            status_code=401,
+        )
 
     try:
-        def _fetch():
-            ym = YMClient(token).init()
-            return [
-                {"id": str(p.kind), "name": p.title, "count": p.track_count}
-                for p in ym.users_playlists_list()
-            ]
-        playlists = await asyncio.to_thread(_fetch)
+        import requests as req
+
+        headers = _ym_auth_headers(
+            music_token,
+            session_id,
+        )
+
+        response = req.get(
+            f"https://api.music.yandex.ru/users/{uid}/playlists/list",
+            headers=headers,
+            timeout=15,
+        )
+
+        try:
+            data = response.json()
+        except ValueError:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"Яндекс вернул не JSON "
+                        f"(HTTP {response.status_code})"
+                    )
+                },
+                status_code=502,
+            )
+
+        if response.status_code >= 400:
+            return JSONResponse(
+                {
+                    "error": (
+                        data.get("error")
+                        or data.get("message")
+                        or f"Yandex HTTP {response.status_code}"
+                    )
+                },
+                status_code=502,
+            )
+
+        result = data.get("result")
+
+        if result is None:
+            return JSONResponse(
+                {
+                    "error": (
+                        data.get("error")
+                        or "Яндекс не вернул список плейлистов"
+                    )
+                },
+                status_code=502,
+            )
+
+        playlists = []
+
+        for playlist in result:
+            if not playlist:
+                continue
+
+            playlists.append({
+                "id": str(playlist.get("kind")),
+                "name": playlist.get("title", "Без названия"),
+                "count": playlist.get("trackCount", 0),
+            })
+
         return {"playlists": playlists}
+
+    except req.RequestException as e:
+        print(
+            f"[yandex_playlists] request failed: {e}",
+            flush=True,
+        )
+        return JSONResponse(
+            {"error": f"Ошибка соединения с Яндексом: {e}"},
+            status_code=502,
+        )
+
     except Exception as e:
-        err = str(e)
-        if "Unauthorized" in err or "401" in err:
-            for k in ("yandex_token", "yandex_user"):
-                request.session.pop(k, None)
-            return JSONResponse({"error": "Токен Яндекса истёк, войди заново"}, status_code=401)
-        return JSONResponse({"error": err}, status_code=500)
+        import traceback
+
+        print(
+            f"[yandex_playlists] ERROR: {e}",
+            flush=True,
+        )
+        print(
+            traceback.format_exc(),
+            flush=True,
+        )
+
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500,
+        )
 
 
 # ── API: Transfer ──────────────────────────────────────────────────────────────
@@ -751,154 +887,844 @@ def _ym_add_tracks(uid, kind, tracks, music_token=None, session_id=None):
         raise Exception(f"Ошибка добавления треков: {r['error']}")
 
 
-def _run_transfer(job_id, direction, playlist_id, playlist_name, spotify_token, yandex_token, yandex_uid=None, yandex_session_id=None, yandex_music_token=None):
+def _run_transfer(
+    job_id,
+    direction,
+    playlist_id,
+    playlist_name,
+    spotify_token,
+    yandex_token,
+    yandex_uid=None,
+    yandex_session_id=None,
+    yandex_music_token=None,
+):
+    """
+    Выполняет перенос плейлиста:
+
+        spotify_to_yandex
+        yandex_to_spotify
+
+    Важно:
+    - yandex-music SDK здесь НЕ используется;
+    - YMClient(...).init() здесь НЕ вызывается;
+    - вся работа с Yandex Music идёт через HTTP API;
+    - Spotify можно использовать через spotipy.
+    """
+
     job = jobs[job_id]
 
     def push(event_type, **kwargs):
-        job["events"].append({"type": event_type, **kwargs})
+        job["events"].append({
+            "type": event_type,
+            **kwargs,
+        })
 
     try:
-        sp = spotipy.Spotify(auth=spotify_token)
-        ym = YMClient(yandex_token).init()
-        uid = (ym.me.account.uid if (ym.me and ym.me.account and ym.me.account.uid) else None) or yandex_uid
+        import requests as req
+
+        # ---------------------------------------------------------
+        # 1. Проверяем Spotify token
+        # ---------------------------------------------------------
+
+        if not spotify_token:
+            raise RuntimeError(
+                "Не найден Spotify access token."
+            )
+
+        # Spotipy нужен только для поиска треков.
+        sp = spotipy.Spotify(
+            auth=spotify_token
+        )
+
+        # ---------------------------------------------------------
+        # 2. Определяем Yandex UID
+        # ---------------------------------------------------------
+
+        uid = yandex_uid
 
         if not uid:
-            push("error", message="Не удалось определить ID пользователя Яндекс. Выйди и войди заново.")
-            job["done"] = True
-            return
+            raise RuntimeError(
+                "Не удалось определить ID пользователя Яндекс. "
+                "Выйди из аккаунта Яндекса и войди заново."
+            )
 
-        # Prefer music_token (Bearer OAuth) over session_id (Cookie) for direct API calls
-        ym_mt = yandex_music_token
+        uid = str(uid)
+
+        # ---------------------------------------------------------
+        # 3. Определяем способ доступа к Yandex Music
+        # ---------------------------------------------------------
+
+        ym_mt = (
+            yandex_music_token
+            or yandex_token
+        )
+
         ym_sid = yandex_session_id
-        ym_direct = bool(ym_mt or ym_sid)  # True if we have direct API access
+
+        if not ym_mt and not ym_sid:
+            raise RuntimeError(
+                "Не найден токен Яндекс Музыки "
+                "или Yandex Music session."
+            )
+
+        ym_headers = _ym_auth_headers(
+            ym_mt,
+            ym_sid,
+        )
+
+        # =========================================================
+        # SPOTIFY -> YANDEX MUSIC
+        # =========================================================
 
         if direction == "spotify_to_yandex":
-            tracks = _get_spotify_tracks(spotify_token, playlist_id)
-            push("total", count=len(tracks))
 
-            if ym_direct:
-                kind = _ym_create_playlist(uid, f"{playlist_name} (from Spotify)", ym_mt, ym_sid)
-            else:
-                kind = ym.users_playlists_create(f"{playlist_name} (from Spotify)", user_id=uid).kind
+            # -----------------------------------------------------
+            # Получаем треки Spotify
+            # -----------------------------------------------------
+
+            push(
+                "status",
+                message="Получаю треки из Spotify..."
+            )
+
+            tracks = _get_spotify_tracks(
+                spotify_token,
+                playlist_id,
+            )
+
+            push(
+                "total",
+                count=len(tracks),
+            )
+
+            if not tracks:
+                push(
+                    "error",
+                    message=(
+                        "В Spotify-плейлисте нет доступных треков."
+                    ),
+                )
+                return
+
+            # -----------------------------------------------------
+            # Создаём новый плейлист Yandex Music
+            # -----------------------------------------------------
+
+            push(
+                "status",
+                message="Создаю плейлист в Яндекс Музыке..."
+            )
+
+            new_playlist_name = (
+                f"{playlist_name} (from Spotify)"
+            )
+
+            kind = _ym_create_playlist(
+                uid,
+                new_playlist_name,
+                ym_mt,
+                ym_sid,
+            )
+
+            print(
+                f"[TRANSFER] Yandex playlist created: "
+                f"uid={uid}, kind={kind}",
+                flush=True,
+            )
+
+            # -----------------------------------------------------
+            # Ищем каждый трек
+            # -----------------------------------------------------
 
             found = []
+
             for i, track in enumerate(tracks, 1):
-                query = f"{normalize(track['artist'])} {normalize(track['title'])}"
-                if ym_direct:
-                    t = _ym_search_track(query, ym_mt, ym_sid)
-                else:
-                    result = ym.search(query, type_="track")
-                    t = None
-                    if result and result.tracks and result.tracks.results:
-                        r0 = result.tracks.results[0]
-                        t = {"id": r0.id, "album_id": r0.albums[0].id if r0.albums else None}
-                if t:
-                    found.append(t)
+
+                artist = (
+                    track.get("artist")
+                    or ""
+                ).strip()
+
+                title = (
+                    track.get("title")
+                    or ""
+                ).strip()
+
+                if not title:
+                    job["not_found"] += 1
+
+                    job["missing"].append(
+                        f"{artist} — {title}"
+                    )
+
+                    push(
+                        "track",
+                        i=i,
+                        status="miss",
+                        artist=artist,
+                        title=title,
+                    )
+
+                    continue
+
+                # Нормализуем только для поиска.
+                normalized_artist = normalize(
+                    artist
+                )
+
+                normalized_title = normalize(
+                    title
+                )
+
+                query = (
+                    f"{normalized_artist} "
+                    f"{normalized_title}"
+                ).strip()
+
+                try:
+                    found_track = _ym_search_track(
+                        query,
+                        ym_mt,
+                        ym_sid,
+                    )
+
+                except Exception as e:
+                    print(
+                        f"[YANDEX SEARCH ERROR] "
+                        f"{artist} - {title}: {e}",
+                        flush=True,
+                    )
+
+                    found_track = None
+
+                if found_track:
+                    found.append(
+                        found_track
+                    )
+
                     job["found"] += 1
-                    push("track", i=i, status="ok", artist=track["artist"], title=track["title"])
+
+                    push(
+                        "track",
+                        i=i,
+                        status="ok",
+                        artist=artist,
+                        title=title,
+                    )
+
                 else:
                     job["not_found"] += 1
-                    job["missing"].append(f"{track['artist']} — {track['title']}")
-                    push("track", i=i, status="miss", artist=track["artist"], title=track["title"])
+
+                    job["missing"].append(
+                        f"{artist} — {title}"
+                    )
+
+                    push(
+                        "track",
+                        i=i,
+                        status="miss",
+                        artist=artist,
+                        title=title,
+                    )
+
+            # -----------------------------------------------------
+            # Добавляем найденные треки в Yandex playlist
+            # -----------------------------------------------------
 
             if found:
-                if ym_direct:
-                    _ym_add_tracks(uid, kind, found, ym_mt, ym_sid)
-                else:
-                    pl = ym.users_playlists(kind, uid)[0]
-                    diff = json.dumps([{"op": "insert", "at": 0,
-                                        "tracks": [{"id": t["id"], "albumId": t["album_id"]} for t in found]}])
-                    ym.users_playlists_change(kind, diff, pl.revision, user_id=uid)
 
-        else:  # yandex_to_spotify
-            if ym_direct:
-                import requests as req
-                ym_h = _ym_auth_headers(ym_mt, ym_sid)
-                pl_resp = req.get(
-                    f"https://api.music.yandex.ru/users/{uid}/playlists/{playlist_id}",
-                    headers=ym_h, timeout=15,
-                ).json()
-                pl_result = pl_resp.get("result")
-                if not pl_result:
-                    push("error", message=f"Плейлист не найден: {pl_resp.get('error', pl_resp)}")
-                    job["done"] = True
-                    return
-                short_tracks = pl_result.get("tracks", [])
-                if short_tracks:
-                    track_ids = ",".join(str(t["id"]) for t in short_tracks)
-                    tracks_resp = req.get(
-                        "https://api.music.yandex.ru/tracks",
-                        params={"track-ids": track_ids},
-                        headers=ym_h, timeout=30,
-                    ).json()
-                    tracks = [
-                        {"title": t["title"], "artist": t["artists"][0]["name"] if t.get("artists") else ""}
-                        for t in (tracks_resp.get("result") or []) if t
-                    ]
-                else:
-                    tracks = []
+                push(
+                    "status",
+                    message=(
+                        f"Добавляю {len(found)} "
+                        f"треков в Яндекс Музыку..."
+                    ),
+                )
+
+                _ym_add_tracks(
+                    uid,
+                    kind,
+                    found,
+                    ym_mt,
+                    ym_sid,
+                )
+
+                push(
+                    "status",
+                    message=(
+                        f"Добавлено треков: {len(found)}"
+                    ),
+                )
+
             else:
-                pl = ym.users_playlists(int(playlist_id), uid)
-                if not pl:
-                    push("error", message="Плейлист не найден")
-                    job["done"] = True
-                    return
-                short = pl[0].tracks or []
-                full = ym.tracks([s.id for s in short]) if short else []
-                tracks = [
-                    {"title": t.title, "artist": t.artists[0].name if t.artists else ""}
-                    for t in (full or []) if t
-                ]
-            push("total", count=len(tracks))
+                push(
+                    "status",
+                    message=(
+                        "Не найдено ни одного трека "
+                        "в Яндекс Музыке."
+                    ),
+                )
 
-            import requests as req
-            new_pl = req.post(
+        # =========================================================
+        # YANDEX MUSIC -> SPOTIFY
+        # =========================================================
+
+        elif direction == "yandex_to_spotify":
+
+            # -----------------------------------------------------
+            # Получаем Yandex playlist
+            # -----------------------------------------------------
+
+            push(
+                "status",
+                message=(
+                    "Получаю плейлист "
+                    "из Яндекс Музыки..."
+                ),
+            )
+
+            playlist_url = (
+                f"https://api.music.yandex.ru/users/"
+                f"{uid}/playlists/{playlist_id}"
+            )
+
+            playlist_resp = req.get(
+                playlist_url,
+                headers=ym_headers,
+                timeout=20,
+            )
+
+            try:
+                playlist_data = (
+                    playlist_resp.json()
+                )
+            except ValueError:
+                raise RuntimeError(
+                    "Яндекс Музыка вернула "
+                    "некорректный ответ при получении "
+                    "плейлиста."
+                )
+
+            if playlist_resp.status_code >= 400:
+                error = (
+                    playlist_data.get("error")
+                    or playlist_data.get("message")
+                    or playlist_data
+                )
+
+                raise RuntimeError(
+                    f"Yandex Music HTTP "
+                    f"{playlist_resp.status_code}: "
+                    f"{error}"
+                )
+
+            playlist_result = (
+                playlist_data.get("result")
+            )
+
+            if not playlist_result:
+                raise RuntimeError(
+                    "Плейлист Яндекс Музыки "
+                    "не найден."
+                )
+
+            # -----------------------------------------------------
+            # Получаем короткие записи треков
+            # -----------------------------------------------------
+
+            short_tracks = (
+                playlist_result.get("tracks")
+                or []
+            )
+
+            if not short_tracks:
+                push(
+                    "total",
+                    count=0,
+                )
+
+                push(
+                    "status",
+                    message=(
+                        "Плейлист Яндекс Музыки пуст."
+                    ),
+                )
+
+                return
+
+            # -----------------------------------------------------
+            # Получаем ID треков
+            # -----------------------------------------------------
+
+            track_ids = []
+
+            for item in short_tracks:
+                if not item:
+                    continue
+
+                track_id = item.get("id")
+
+                if track_id is None:
+                    continue
+
+                track_ids.append(
+                    str(track_id)
+                )
+
+            if not track_ids:
+                raise RuntimeError(
+                    "В плейлисте не найдено "
+                    "ни одного ID трека."
+                )
+
+            # -----------------------------------------------------
+            # Yandex API может принять список track-ids
+            # -----------------------------------------------------
+
+            tracks = []
+
+            # Делаем небольшие пачки, чтобы URL/запрос
+            # не становился слишком большим.
+            for start in range(
+                0,
+                len(track_ids),
+                100,
+            ):
+
+                batch_ids = track_ids[
+                    start:start + 100
+                ]
+
+                tracks_resp = req.get(
+                    "https://api.music.yandex.ru/tracks",
+                    params={
+                        "track-ids": ",".join(
+                            batch_ids
+                        )
+                    },
+                    headers=ym_headers,
+                    timeout=30,
+                )
+
+                try:
+                    tracks_data = (
+                        tracks_resp.json()
+                    )
+                except ValueError:
+                    raise RuntimeError(
+                        "Яндекс Музыка вернула "
+                        "некорректный ответ при "
+                        "получении треков."
+                    )
+
+                if tracks_resp.status_code >= 400:
+                    error = (
+                        tracks_data.get("error")
+                        or tracks_data.get("message")
+                        or tracks_data
+                    )
+
+                    raise RuntimeError(
+                        f"Yandex Music HTTP "
+                        f"{tracks_resp.status_code}: "
+                        f"{error}"
+                    )
+
+                result_tracks = (
+                    tracks_data.get("result")
+                    or []
+                )
+
+                for track in result_tracks:
+
+                    if not track:
+                        continue
+
+                    title = (
+                        track.get("title")
+                        or ""
+                    )
+
+                    artists = (
+                        track.get("artists")
+                        or []
+                    )
+
+                    artist = ""
+
+                    if artists:
+                        artist = (
+                            artists[0].get("name")
+                            or ""
+                        )
+
+                    if not title:
+                        continue
+
+                    tracks.append({
+                        "title": title,
+                        "artist": artist,
+                    })
+
+            # -----------------------------------------------------
+            # Сообщаем количество
+            # -----------------------------------------------------
+
+            push(
+                "total",
+                count=len(tracks),
+            )
+
+            if not tracks:
+                push(
+                    "status",
+                    message=(
+                        "Не удалось получить "
+                        "информацию о треках."
+                    ),
+                )
+
+                return
+
+            # -----------------------------------------------------
+            # Создаём Spotify playlist
+            # -----------------------------------------------------
+
+            push(
+                "status",
+                message=(
+                    "Создаю плейлист в Spotify..."
+                ),
+            )
+
+            spotify_headers = {
+                "Authorization": (
+                    f"Bearer {spotify_token}"
+                ),
+                "Content-Type": (
+                    "application/json"
+                ),
+            }
+
+            create_resp = req.post(
                 "https://api.spotify.com/v1/me/playlists",
-                json={"name": f"{playlist_name} (from Yandex)", "public": False},
-                headers={"Authorization": f"Bearer {spotify_token}", "Content-Type": "application/json"},
-                timeout=15,
-            ).json()
-            if "id" not in new_pl:
-                raise Exception(f"Spotify: не удалось создать плейлист: {new_pl}")
-            new_pl_id = new_pl["id"]
+                json={
+                    "name": (
+                        f"{playlist_name} "
+                        f"(from Yandex)"
+                    ),
+                    "public": False,
+                },
+                headers=spotify_headers,
+                timeout=20,
+            )
+
+            try:
+                new_playlist = (
+                    create_resp.json()
+                )
+            except ValueError:
+                raise RuntimeError(
+                    "Spotify вернул "
+                    "некорректный ответ при "
+                    "создании плейлиста."
+                )
+
+            if create_resp.status_code >= 400:
+                error = (
+                    new_playlist.get("error")
+                    or new_playlist
+                )
+
+                raise RuntimeError(
+                    f"Spotify HTTP "
+                    f"{create_resp.status_code}: "
+                    f"{error}"
+                )
+
+            new_playlist_id = (
+                new_playlist.get("id")
+            )
+
+            if not new_playlist_id:
+                raise RuntimeError(
+                    "Spotify не вернул ID "
+                    "созданного плейлиста."
+                )
+
+            # -----------------------------------------------------
+            # Ищем каждый Yandex track в Spotify
+            # -----------------------------------------------------
 
             found_ids = []
-            for i, track in enumerate(tracks, 1):
-                a, t_title = normalize(track["artist"]), normalize(track["title"])
-                res = sp.search(q=f'track:"{t_title}" artist:"{a}"', type="track", limit=1)
-                items = res["tracks"]["items"]
+
+            for i, track in enumerate(
+                tracks,
+                1,
+            ):
+
+                artist = (
+                    track.get("artist")
+                    or ""
+                ).strip()
+
+                title = (
+                    track.get("title")
+                    or ""
+                ).strip()
+
+                if not title:
+                    job["not_found"] += 1
+
+                    job["missing"].append(
+                        f"{artist} — {title}"
+                    )
+
+                    push(
+                        "track",
+                        i=i,
+                        status="miss",
+                        artist=artist,
+                        title=title,
+                    )
+
+                    continue
+
+                normalized_artist = normalize(
+                    artist
+                )
+
+                normalized_title = normalize(
+                    title
+                )
+
+                # -------------------------------------------------
+                # Сначала точный поиск
+                # -------------------------------------------------
+
+                try:
+                    result = sp.search(
+                        q=(
+                            f'track:"'
+                            f'{normalized_title}'
+                            f'" artist:"'
+                            f'{normalized_artist}'
+                            f'"'
+                        ),
+                        type="track",
+                        limit=1,
+                    )
+
+                    items = (
+                        result
+                        .get("tracks", {})
+                        .get("items", [])
+                    )
+
+                except Exception as e:
+                    print(
+                        f"[SPOTIFY SEARCH] "
+                        f"{artist} - {title}: {e}",
+                        flush=True,
+                    )
+
+                    items = []
+
+                # -------------------------------------------------
+                # Если точный поиск не дал результата —
+                # более свободный поиск
+                # -------------------------------------------------
+
                 if not items:
-                    res = sp.search(q=f"{a} {t_title}", type="track", limit=1)
-                    items = res["tracks"]["items"]
+
+                    try:
+                        result = sp.search(
+                            q=(
+                                f"{normalized_artist} "
+                                f"{normalized_title}"
+                            ).strip(),
+                            type="track",
+                            limit=1,
+                        )
+
+                        items = (
+                            result
+                            .get("tracks", {})
+                            .get("items", [])
+                        )
+
+                    except Exception as e:
+                        print(
+                            f"[SPOTIFY FALLBACK SEARCH] "
+                            f"{artist} - {title}: {e}",
+                            flush=True,
+                        )
+
+                        items = []
+
+                # -------------------------------------------------
+                # Нашли
+                # -------------------------------------------------
 
                 if items:
-                    found_ids.append(items[0]["id"])
-                    job["found"] += 1
-                    push("track", i=i, status="ok", artist=track["artist"], title=track["title"])
-                else:
-                    job["not_found"] += 1
-                    job["missing"].append(f"{track['artist']} — {track['title']}")
-                    push("track", i=i, status="miss", artist=track["artist"], title=track["title"])
 
-            sp_headers = {"Authorization": f"Bearer {spotify_token}", "Content-Type": "application/json"}
-            for i in range(0, len(found_ids), 100):
-                batch = [f"spotify:track:{tid}" for tid in found_ids[i:i + 100]]
-                r = req.post(
-                    f"https://api.spotify.com/v1/playlists/{new_pl_id}/items",
-                    json={"uris": batch},
-                    headers=sp_headers,
-                    timeout=15,
-                ).json()
-                if "error" in r:
-                    raise Exception(f"Spotify add tracks: {r['error']}")
+                    spotify_track_id = (
+                        items[0].get("id")
+                    )
+
+                    if spotify_track_id:
+
+                        found_ids.append(
+                            spotify_track_id
+                        )
+
+                        job["found"] += 1
+
+                        push(
+                            "track",
+                            i=i,
+                            status="ok",
+                            artist=artist,
+                            title=title,
+                        )
+
+                        continue
+
+                # -------------------------------------------------
+                # Не нашли
+                # -------------------------------------------------
+
+                job["not_found"] += 1
+
+                job["missing"].append(
+                    f"{artist} — {title}"
+                )
+
+                push(
+                    "track",
+                    i=i,
+                    status="miss",
+                    artist=artist,
+                    title=title,
+                )
+
+            # -----------------------------------------------------
+            # Добавляем Spotify tracks пачками по 100
+            # -----------------------------------------------------
+
+            if found_ids:
+
+                push(
+                    "status",
+                    message=(
+                        f"Добавляю {len(found_ids)} "
+                        f"треков в Spotify..."
+                    ),
+                )
+
+                for start in range(
+                    0,
+                    len(found_ids),
+                    100,
+                ):
+
+                    batch = found_ids[
+                        start:start + 100
+                    ]
+
+                    add_resp = req.post(
+                        (
+                            "https://api.spotify.com/v1/"
+                            f"playlists/{new_playlist_id}/items"
+                        ),
+                        json={
+                            "uris": [
+                                f"spotify:track:{track_id}"
+                                for track_id in batch
+                            ]
+                        },
+                        headers=spotify_headers,
+                        timeout=20,
+                    )
+
+                    try:
+                        add_data = (
+                            add_resp.json()
+                        )
+                    except ValueError:
+                        add_data = {}
+
+                    if add_resp.status_code >= 400:
+                        error = (
+                            add_data.get("error")
+                            or add_data
+                        )
+
+                        raise RuntimeError(
+                            f"Spotify HTTP "
+                            f"{add_resp.status_code} "
+                            f"при добавлении треков: "
+                            f"{error}"
+                        )
+
+                    if (
+                        isinstance(add_data, dict)
+                        and add_data.get("error")
+                    ):
+                        raise RuntimeError(
+                            "Spotify add tracks: "
+                            f"{add_data['error']}"
+                        )
+
+                push(
+                    "status",
+                    message=(
+                        f"Добавлено в Spotify: "
+                        f"{len(found_ids)}"
+                    ),
+                )
+
+            else:
+
+                push(
+                    "status",
+                    message=(
+                        "В Spotify не найден "
+                        "ни один трек."
+                    ),
+                )
+
+        # =========================================================
+        # НЕИЗВЕСТНОЕ НАПРАВЛЕНИЕ
+        # =========================================================
+
+        else:
+            raise RuntimeError(
+                f"Неизвестное направление переноса: "
+                f"{direction}"
+            )
 
     except Exception as e:
-        import traceback
-        print(f"[TRANSFER ERROR] {e}")
-        print(traceback.format_exc())
-        push("error", message=str(e))
 
-    job["done"] = True
+        import traceback
+
+        print(
+            f"[TRANSFER ERROR] {e}",
+            flush=True,
+        )
+
+        print(
+            traceback.format_exc(),
+            flush=True,
+        )
+
+        push(
+            "error",
+            message=str(e),
+        )
+
+    finally:
+        job["done"] = True
 
 
 
